@@ -1,9 +1,12 @@
 package org.zaproxy.zap.extension.prettify;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.parosproxy.paros.Constant;
 import org.parosproxy.paros.extension.ExtensionAdaptor;
 import org.parosproxy.paros.extension.ExtensionHook;
 import org.zaproxy.zap.extension.httppanel.component.split.request.RequestSplitComponent;
+import org.zaproxy.zap.extension.httppanel.view.AbstractStringHttpPanelViewModel;
 import org.zaproxy.zap.extension.httppanel.view.HttpPanelView;
 import org.zaproxy.zap.extension.httppanel.view.impl.models.http.request.RequestBodyStringHttpPanelViewModel;
 import org.zaproxy.zap.extension.httppanel.view.impl.models.http.request.RequestHeaderStringHttpPanelViewModel;
@@ -19,9 +22,23 @@ import org.zaproxy.zap.view.HttpPanelManager;
  */
 public class ExtensionPrettify extends ExtensionAdaptor {
 
+    private static final Logger LOGGER = LogManager.getLogger(ExtensionPrettify.class);
+
     public static final String NAME = "ExtensionPrettify";
 
     private static final String CAPTION_KEY = "prettify.view.name";
+
+    // Each view's name is the single source of truth for both registration and removal.
+    // HttpPanelManager keys factories by the factory's name and mounted views by the view's own
+    // name (HttpPanelView.getName()); using the same string for both keeps remove*ViewFactory and
+    // remove*Views in sync, so an unload actually detaches the tab instead of only stopping new
+    // panels from receiving it.
+    private static final String VIEW_REQUEST_SPLIT_HEADER = "PrettifyRequestSplitHeader";
+    private static final String VIEW_REQUEST_SPLIT_BODY = "PrettifyRequestSplitBody";
+    private static final String VIEW_RESPONSE_SPLIT_HEADER = "PrettifyResponseSplitHeader";
+    private static final String VIEW_RESPONSE_SPLIT_BODY = "PrettifyResponseSplitBody";
+    private static final String VIEW_REQUEST_ALL = "PrettifyRequestAll";
+    private static final String VIEW_RESPONSE_ALL = "PrettifyResponseAll";
 
     public ExtensionPrettify() {
         super(NAME);
@@ -49,12 +66,52 @@ public class ExtensionPrettify extends ExtensionAdaptor {
             return;
         }
         HttpPanelManager panelManager = HttpPanelManager.getInstance();
-        panelManager.addRequestViewFactory("RequestSplit", new RequestSplitHeaderViewFactory());
-        panelManager.addRequestViewFactory("RequestSplit", new RequestSplitBodyViewFactory());
-        panelManager.addResponseViewFactory("ResponseSplit", new ResponseSplitHeaderViewFactory());
-        panelManager.addResponseViewFactory("ResponseSplit", new ResponseSplitBodyViewFactory());
-        panelManager.addRequestViewFactory("RequestAll", new RequestAllViewFactory());
-        panelManager.addResponseViewFactory("ResponseAll", new ResponseAllViewFactory());
+        panelManager.addRequestViewFactory(
+                "RequestSplit",
+                new SplitViewFactory(
+                        VIEW_REQUEST_SPLIT_HEADER,
+                        RequestSplitComponent.ViewComponent.HEADER,
+                        "prettify/http-request-head",
+                        PrettifyHttpPanelView.Target.REQUEST_HEAD,
+                        new RequestHeaderStringHttpPanelViewModel()));
+        panelManager.addRequestViewFactory(
+                "RequestSplit",
+                new SplitViewFactory(
+                        VIEW_REQUEST_SPLIT_BODY,
+                        RequestSplitComponent.ViewComponent.BODY,
+                        null,
+                        PrettifyHttpPanelView.Target.REQUEST_BODY,
+                        new RequestBodyStringHttpPanelViewModel()));
+        panelManager.addResponseViewFactory(
+                "ResponseSplit",
+                new SplitViewFactory(
+                        VIEW_RESPONSE_SPLIT_HEADER,
+                        RequestSplitComponent.ViewComponent.HEADER,
+                        "prettify/http-response-head",
+                        PrettifyHttpPanelView.Target.RESPONSE_HEAD,
+                        new ResponseHeaderStringHttpPanelViewModel()));
+        panelManager.addResponseViewFactory(
+                "ResponseSplit",
+                new SplitViewFactory(
+                        VIEW_RESPONSE_SPLIT_BODY,
+                        RequestSplitComponent.ViewComponent.BODY,
+                        null,
+                        PrettifyHttpPanelView.Target.RESPONSE_BODY,
+                        new ResponseBodyStringHttpPanelViewModel()));
+        panelManager.addRequestViewFactory(
+                "RequestAll",
+                new AllViewFactory(
+                        VIEW_REQUEST_ALL,
+                        "prettify/http-request",
+                        PrettifyHttpPanelView.Target.REQUEST_ALL,
+                        new RequestStringHttpPanelViewModel()));
+        panelManager.addResponseViewFactory(
+                "ResponseAll",
+                new AllViewFactory(
+                        VIEW_RESPONSE_ALL,
+                        "prettify/http-response",
+                        PrettifyHttpPanelView.Target.RESPONSE_ALL,
+                        new ResponseStringHttpPanelViewModel()));
     }
 
     @Override
@@ -68,160 +125,96 @@ public class ExtensionPrettify extends ExtensionAdaptor {
             return;
         }
         HttpPanelManager panelManager = HttpPanelManager.getInstance();
-        panelManager.removeRequestViewFactory("RequestSplit", RequestSplitHeaderViewFactory.NAME);
-        panelManager.removeRequestViews(
-                "RequestSplit", RequestSplitHeaderViewFactory.NAME, RequestSplitComponent.ViewComponent.HEADER);
-        panelManager.removeRequestViewFactory("RequestSplit", RequestSplitBodyViewFactory.NAME);
-        panelManager.removeRequestViews(
-                "RequestSplit", RequestSplitBodyViewFactory.NAME, RequestSplitComponent.ViewComponent.BODY);
-        panelManager.removeResponseViewFactory("ResponseSplit", ResponseSplitHeaderViewFactory.NAME);
-        panelManager.removeResponseViews(
-                "ResponseSplit", ResponseSplitHeaderViewFactory.NAME, RequestSplitComponent.ViewComponent.HEADER);
-        panelManager.removeResponseViewFactory("ResponseSplit", ResponseSplitBodyViewFactory.NAME);
-        panelManager.removeResponseViews(
-                "ResponseSplit", ResponseSplitBodyViewFactory.NAME, RequestSplitComponent.ViewComponent.BODY);
-        panelManager.removeRequestViewFactory("RequestAll", RequestAllViewFactory.NAME);
-        panelManager.removeRequestViews("RequestAll", RequestAllViewFactory.NAME, null);
-        panelManager.removeResponseViewFactory("ResponseAll", ResponseAllViewFactory.NAME);
-        panelManager.removeResponseViews("ResponseAll", ResponseAllViewFactory.NAME, null);
+        // Drop the factories first so panels stop being offered a "Pretty" view, then detach the
+        // instances already mounted on the open request/response panels. Both steps are required:
+        // the view removal is what makes the tab disappear immediately, without a restart.
+        safe(() -> panelManager.removeRequestViewFactory("RequestSplit", VIEW_REQUEST_SPLIT_HEADER), "request header view factory");
+        safe(() -> panelManager.removeRequestViewFactory("RequestSplit", VIEW_REQUEST_SPLIT_BODY), "request body view factory");
+        safe(() -> panelManager.removeResponseViewFactory("ResponseSplit", VIEW_RESPONSE_SPLIT_HEADER), "response header view factory");
+        safe(() -> panelManager.removeResponseViewFactory("ResponseSplit", VIEW_RESPONSE_SPLIT_BODY), "response body view factory");
+        safe(() -> panelManager.removeRequestViewFactory("RequestAll", VIEW_REQUEST_ALL), "request view factory");
+        safe(() -> panelManager.removeResponseViewFactory("ResponseAll", VIEW_RESPONSE_ALL), "response view factory");
+
+        safe(() -> panelManager.removeRequestViews("RequestSplit", VIEW_REQUEST_SPLIT_HEADER, RequestSplitComponent.ViewComponent.HEADER), "request header views");
+        safe(() -> panelManager.removeRequestViews("RequestSplit", VIEW_REQUEST_SPLIT_BODY, RequestSplitComponent.ViewComponent.BODY), "request body views");
+        safe(() -> panelManager.removeResponseViews("ResponseSplit", VIEW_RESPONSE_SPLIT_HEADER, RequestSplitComponent.ViewComponent.HEADER), "response header views");
+        safe(() -> panelManager.removeResponseViews("ResponseSplit", VIEW_RESPONSE_SPLIT_BODY, RequestSplitComponent.ViewComponent.BODY), "response body views");
+        safe(() -> panelManager.removeRequestViews("RequestAll", VIEW_REQUEST_ALL, null), "request views");
+        safe(() -> panelManager.removeResponseViews("ResponseAll", VIEW_RESPONSE_ALL, null), "response views");
     }
 
-    private static final class RequestSplitHeaderViewFactory implements HttpPanelManager.HttpPanelViewFactory {
-        private static final String NAME = "PrettifyRequestSplitHeaderViewFactory";
+    /** Runs one removal, logging and continuing on failure so unload cannot stop half-way. */
+    private static void safe(Runnable removal, String what) {
+        try {
+            removal.run();
+        } catch (RuntimeException e) {
+            LOGGER.warn("Failed to remove {} during unload; continuing.", what, e);
+        }
+    }
+
+    /** Factory for a request/response split pane (header or body) "Pretty" view. */
+    private static final class SplitViewFactory implements HttpPanelManager.HttpPanelViewFactory {
+        private final String name;
+        private final Object viewComponent;
+        private final String styleKey;
+        private final PrettifyHttpPanelView.Target target;
+        private final AbstractStringHttpPanelViewModel model;
+
+        SplitViewFactory(
+                String name,
+                Object viewComponent,
+                String styleKey,
+                PrettifyHttpPanelView.Target target,
+                AbstractStringHttpPanelViewModel model) {
+            this.name = name;
+            this.viewComponent = viewComponent;
+            this.styleKey = styleKey;
+            this.target = target;
+            this.model = model;
+        }
 
         @Override
         public String getName() {
-            return NAME;
+            return name;
         }
 
         @Override
         public HttpPanelView getNewView() {
-            return new PrettifyHttpPanelView(
-                    "PrettifyRequestSplitHeader",
-                    CAPTION_KEY,
-                    "prettify/http-request-head",
-                    PrettifyHttpPanelView.Target.REQUEST_HEAD,
-                    new RequestHeaderStringHttpPanelViewModel());
+            return new PrettifyHttpPanelView(name, CAPTION_KEY, styleKey, target, model);
         }
 
         @Override
         public Object getOptions() {
-            return RequestSplitComponent.ViewComponent.HEADER;
+            return viewComponent;
         }
     }
 
-    private static final class RequestSplitBodyViewFactory implements HttpPanelManager.HttpPanelViewFactory {
-        private static final String NAME = "PrettifyRequestSplitBodyViewFactory";
+    /** Factory for a combined (All) "Pretty" view. */
+    private static final class AllViewFactory implements HttpPanelManager.HttpPanelViewFactory {
+        private final String name;
+        private final String styleKey;
+        private final PrettifyHttpPanelView.Target target;
+        private final AbstractStringHttpPanelViewModel model;
+
+        AllViewFactory(
+                String name,
+                String styleKey,
+                PrettifyHttpPanelView.Target target,
+                AbstractStringHttpPanelViewModel model) {
+            this.name = name;
+            this.styleKey = styleKey;
+            this.target = target;
+            this.model = model;
+        }
 
         @Override
         public String getName() {
-            return NAME;
+            return name;
         }
 
         @Override
         public HttpPanelView getNewView() {
-            return new PrettifyHttpPanelView(
-                    "PrettifyRequestSplitBody",
-                    CAPTION_KEY,
-                    null,
-                    PrettifyHttpPanelView.Target.REQUEST_BODY,
-                    new RequestBodyStringHttpPanelViewModel());
-        }
-
-        @Override
-        public Object getOptions() {
-            return RequestSplitComponent.ViewComponent.BODY;
-        }
-    }
-
-    private static final class ResponseSplitHeaderViewFactory implements HttpPanelManager.HttpPanelViewFactory {
-        private static final String NAME = "PrettifyResponseSplitHeaderViewFactory";
-
-        @Override
-        public String getName() {
-            return NAME;
-        }
-
-        @Override
-        public HttpPanelView getNewView() {
-            return new PrettifyHttpPanelView(
-                    "PrettifyResponseSplitHeader",
-                    CAPTION_KEY,
-                    "prettify/http-response-head",
-                    PrettifyHttpPanelView.Target.RESPONSE_HEAD,
-                    new ResponseHeaderStringHttpPanelViewModel());
-        }
-
-        @Override
-        public Object getOptions() {
-            return RequestSplitComponent.ViewComponent.HEADER;
-        }
-    }
-
-    private static final class ResponseSplitBodyViewFactory implements HttpPanelManager.HttpPanelViewFactory {
-        private static final String NAME = "PrettifyResponseSplitBodyViewFactory";
-
-        @Override
-        public String getName() {
-            return NAME;
-        }
-
-        @Override
-        public HttpPanelView getNewView() {
-            return new PrettifyHttpPanelView(
-                    "PrettifyResponseSplitBody",
-                    CAPTION_KEY,
-                    null,
-                    PrettifyHttpPanelView.Target.RESPONSE_BODY,
-                    new ResponseBodyStringHttpPanelViewModel());
-        }
-
-        @Override
-        public Object getOptions() {
-            return RequestSplitComponent.ViewComponent.BODY;
-        }
-    }
-
-    private static final class RequestAllViewFactory implements HttpPanelManager.HttpPanelViewFactory {
-        private static final String NAME = "PrettifyRequestAllViewFactory";
-
-        @Override
-        public String getName() {
-            return NAME;
-        }
-
-        @Override
-        public HttpPanelView getNewView() {
-            return new PrettifyHttpPanelView(
-                    "PrettifyRequestAll",
-                    CAPTION_KEY,
-                    "prettify/http-request",
-                    PrettifyHttpPanelView.Target.REQUEST_ALL,
-                    new RequestStringHttpPanelViewModel());
-        }
-
-        @Override
-        public Object getOptions() {
-            return null;
-        }
-    }
-
-    private static final class ResponseAllViewFactory implements HttpPanelManager.HttpPanelViewFactory {
-        private static final String NAME = "PrettifyResponseAllViewFactory";
-
-        @Override
-        public String getName() {
-            return NAME;
-        }
-
-        @Override
-        public HttpPanelView getNewView() {
-            return new PrettifyHttpPanelView(
-                    "PrettifyResponseAll",
-                    CAPTION_KEY,
-                    "prettify/http-response",
-                    PrettifyHttpPanelView.Target.RESPONSE_ALL,
-                    new ResponseStringHttpPanelViewModel());
+            return new PrettifyHttpPanelView(name, CAPTION_KEY, styleKey, target, model);
         }
 
         @Override

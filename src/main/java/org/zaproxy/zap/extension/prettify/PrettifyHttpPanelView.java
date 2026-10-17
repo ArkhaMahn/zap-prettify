@@ -121,7 +121,11 @@ public class PrettifyHttpPanelView
 
     @Override
     public String getTargetViewName() {
-        return "HttpPanelTextView";
+        // Add "Pretty" as its own tab rather than having it replace the core "Text" view.
+        // Replacing the text view is destructive (the core view is removed from the panel and
+        // never restored), so unloading the add-on could not put the panel back the way it was.
+        // Targeting nothing keeps the add-on non-destructive and cleanly removable at runtime.
+        return "";
     }
 
     @Override
