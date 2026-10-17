@@ -85,6 +85,9 @@ public class PrettifyHttpPanelView
                 text = PrettyPrint.formatMessage(ContentType.styleKeyFor(contentTypeOf(message)), text);
             } else if (target == Target.REQUEST_BODY || target == Target.RESPONSE_BODY) {
                 text = PrettyPrint.formatBody(styleKey, text);
+            } else {
+                // Header tabs: drop the blank line that terminates the header block.
+                text = PrettyPrint.stripTrailingNewlines(text);
             }
         }
         textArea.setText(text);

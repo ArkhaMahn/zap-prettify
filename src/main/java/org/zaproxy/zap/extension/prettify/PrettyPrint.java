@@ -62,9 +62,31 @@ public final class PrettyPrint {
         }
         int split = bodyOffset(message);
         if (split < 0 || split >= message.length()) {
-            return message;
+            // No body: drop the blank line ZAP keeps after the header block so the headers are not
+            // followed by dangling empty lines.
+            return stripTrailingNewlines(message);
         }
         return message.substring(0, split) + formatBody(bodyStyleKey, message.substring(split));
+    }
+
+    /**
+     * Removes trailing CR/LF characters. ZAP represents a header block as {@code lines + CRLF + CRLF}
+     * (the blank line that ends the headers), which reads as extra blank lines when nothing follows.
+     */
+    public static String stripTrailingNewlines(String s) {
+        if (s == null) {
+            return null;
+        }
+        int end = s.length();
+        while (end > 0) {
+            char c = s.charAt(end - 1);
+            if (c == '\n' || c == '\r') {
+                end--;
+            } else {
+                break;
+            }
+        }
+        return end == s.length() ? s : s.substring(0, end);
     }
 
     /** Returns the offset of the first byte of the body, or -1 if the message has no body. */
