@@ -2,6 +2,7 @@ package org.zaproxy.zap.extension.prettify;
 
 import org.fife.ui.rsyntaxtextarea.RSyntaxDocument;
 import org.fife.ui.rsyntaxtextarea.RSyntaxTextArea;
+import org.fife.ui.rtextarea.RTextAreaUI;
 import org.zaproxy.zap.utils.FontUtils;
 
 /**
@@ -35,6 +36,11 @@ public class PrettifyTextArea extends RSyntaxTextArea {
         setCloseCurlyBraces(false);
         setCloseMarkupTags(false);
         setClearWhitespaceLinesEnabled(false);
+    }
+
+    @Override
+    protected RTextAreaUI createRTextAreaUI() {
+        return new PrettifyTextAreaUI(this);
     }
 
     public boolean isDark() {
