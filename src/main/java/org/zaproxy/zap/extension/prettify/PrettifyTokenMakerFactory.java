@@ -40,6 +40,8 @@ public class PrettifyTokenMakerFactory extends AbstractTokenMakerFactory {
                 return new HttpResponseHeadTokenMaker();
             case STYLE_FORM:
                 return new FormUrlEncodedTokenMaker();
+            case ContentType.GRAPHQL_STYLE:
+                return TokenMakerFactory.getDefaultInstance().getTokenMaker(ContentType.PLAIN_STYLE);
             default:
                 return TokenMakerFactory.getDefaultInstance().getTokenMaker(key);
         }

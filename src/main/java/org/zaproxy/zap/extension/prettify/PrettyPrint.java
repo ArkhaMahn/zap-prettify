@@ -36,13 +36,17 @@ public final class PrettyPrint {
                 case "text/json":
                     return json(body);
                 case "text/xml":
-                    return markup(body, false);
+                    return markup(body, false, styleKey);
                 case "text/html":
-                    return markup(body, true);
+                    return markup(body, true, styleKey);
                 case "text/css":
-                    return braces(body, false, false);
+                    return braces(body, false, styleKey);
                 case "text/javascript":
-                    return braces(body, true, true);
+                    return braces(body, true, styleKey);
+                case ContentType.GRAPHQL_STYLE:
+                    return graphql(body);
+                case ContentType.FORM_STYLE:
+                    return form(body);
                 default:
                     return body;
             }
@@ -149,7 +153,11 @@ public final class PrettyPrint {
     // CSS / JavaScript
     // ---------------------------------------------------------------------
 
-    private static String braces(String s, boolean breakCommaInBraces, boolean js) {
+    private static String braces(String s, boolean breakCommaInBraces, String styleKey) {
+        Lexer lex = Lexer.of(styleKey, s);
+        if (lex == null) {
+            return s;
+        }
         StringBuilder out = new StringBuilder(s.length() + 64);
         Deque<Character> stack = new ArrayDeque<>();
         int indent = 0;
@@ -161,49 +169,21 @@ public final class PrettyPrint {
         while (i < n) {
             char c = s.charAt(i);
 
-            if (c == '/' && i + 1 < n && s.charAt(i + 1) == '*') {
-                int e = s.indexOf("*/", i + 2);
-                e = (e < 0) ? n : e + 2;
-                spaceBefore(out, pendingSpace, atLineStart, last);
-                out.append(s, i, e);
-                atLineStart = false;
-                pendingSpace = false;
-                last = s.charAt(e - 1);
-                i = e;
-                continue;
-            }
-            if (js && c == '/' && i + 1 < n && s.charAt(i + 1) == '/') {
-                int e = i;
-                while (e < n && s.charAt(e) != '\n' && s.charAt(e) != '\r') {
-                    e++;
+            if (lex.opaque[i]) {
+                int j = i;
+                while (j < n && lex.opaque[j]) {
+                    j++;
                 }
                 spaceBefore(out, pendingSpace, atLineStart, last);
-                out.append(s, i, e);
-                line(out, indent);
-                atLineStart = true;
-                pendingSpace = false;
-                last = s.charAt(e - 1);
-                i = e;
-                continue;
-            }
-            if (js && c == '/' && i + 1 < n && regexContext(s, i)) {
-                int e = endOfRegex(s, i);
-                spaceBefore(out, pendingSpace, atLineStart, last);
-                out.append(s, i, e);
+                out.append(s, i, j);
                 atLineStart = false;
                 pendingSpace = false;
-                last = s.charAt(e - 1);
-                i = e;
-                continue;
-            }
-            if (c == '"' || c == '\'' || (js && c == '`')) {
-                int e = endOfString(s, i, c);
-                spaceBefore(out, pendingSpace, atLineStart, last);
-                out.append(s, i, e);
-                atLineStart = false;
-                pendingSpace = false;
-                last = c;
-                i = e;
+                last = s.charAt(j - 1);
+                if (lex.lineComment[i]) {
+                    line(out, indent);
+                    atLineStart = true;
+                }
+                i = j;
                 continue;
             }
             if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
@@ -295,7 +275,7 @@ public final class PrettyPrint {
                     i++;
             }
         }
-        return out.toString();
+        return trimTrailing(out);
     }
 
     private static void spaceBefore(
@@ -307,68 +287,6 @@ public final class PrettyPrint {
 
     private static boolean isOpening(char c) {
         return c == '(' || c == '[' || c == '{';
-    }
-
-    /** Keywords after which a {@code /} starts a regular expression rather than a division. */
-    private static final Set<String> REGEX_KEYWORDS =
-            Set.of(
-                    "return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "do",
-                    "else", "case", "yield", "await", "throw");
-
-    /** Heuristic: is a {@code /} at {@code slashIdx} the start of a JavaScript regex literal? */
-    private static boolean regexContext(String s, int slashIdx) {
-        int j = slashIdx - 1;
-        while (j >= 0 && Character.isWhitespace(s.charAt(j))) {
-            j--;
-        }
-        if (j < 0) {
-            return true;
-        }
-        char p = s.charAt(j);
-        if ("([{,;:!&|?+-*%~^<=>".indexOf(p) >= 0) {
-            return true;
-        }
-        if (Character.isLetterOrDigit(p) || p == '_' || p == '$') {
-            int k = j;
-            while (k >= 0
-                    && (Character.isLetterOrDigit(s.charAt(k))
-                            || s.charAt(k) == '_'
-                            || s.charAt(k) == '$')) {
-                k--;
-            }
-            return REGEX_KEYWORDS.contains(s.substring(k + 1, j + 1));
-        }
-        return false;
-    }
-
-    /** Returns the end index (exclusive) of a regex literal starting at {@code start}. */
-    private static int endOfRegex(String s, int start) {
-        int n = s.length();
-        int i = start + 1;
-        boolean inClass = false;
-        while (i < n) {
-            char c = s.charAt(i);
-            if (c == '\\') {
-                i += 2;
-                continue;
-            }
-            if (c == '\n' || c == '\r') {
-                return i;
-            }
-            if (c == '[') {
-                inClass = true;
-            } else if (c == ']') {
-                inClass = false;
-            } else if (c == '/' && !inClass) {
-                i++;
-                break;
-            }
-            i++;
-        }
-        while (i < n && Character.isLetter(s.charAt(i))) {
-            i++;
-        }
-        return Math.min(i, n);
     }
 
     // ---------------------------------------------------------------------
@@ -394,20 +312,30 @@ public final class PrettyPrint {
         final List<Object> children = new ArrayList<>();
     }
 
-    private static String markup(String s, boolean html) {
-        List<Piece> pieces = tokenizeMarkup(s);
+    private static String markup(String s, boolean html, String styleKey) {
+        Lexer lex = Lexer.of(styleKey, s);
+        if (lex == null) {
+            return s;
+        }
+        List<Piece> pieces = tokenizeMarkup(s, lex);
         List<Object> tree = buildTree(pieces, html);
         StringBuilder out = new StringBuilder(s.length() + 64);
         render(tree, 0, s, html, out);
         return out.toString();
     }
 
-    private static List<Piece> tokenizeMarkup(String s) {
+    private static List<Piece> tokenizeMarkup(String s, Lexer lex) {
         List<Piece> pieces = new ArrayList<>();
         int n = s.length();
         int i = 0;
         while (i < n) {
-            int lt = s.indexOf('<', i);
+            int lt = -1;
+            for (int k = i; k < n; k++) {
+                if (s.charAt(k) == '<' && !lex.literal[k]) {
+                    lt = k;
+                    break;
+                }
+            }
             if (lt < 0) {
                 addText(pieces, i, n);
                 break;
@@ -430,8 +358,12 @@ public final class PrettyPrint {
                 e = (e < 0) ? n : e + 1;
                 addOther(pieces, lt, e);
                 i = e;
+            } else if (!lex.tagDelim[lt]) {
+                // A stray '<' in text rather than a tag start.
+                addText(pieces, lt, lt + 1);
+                i = lt + 1;
             } else {
-                int e = findTagEnd(s, lt);
+                int e = findTagEnd(s, lt, lex);
                 String inner = s.substring(lt + 1, e);
                 Piece p = new Piece();
                 p.start = lt;
@@ -475,10 +407,13 @@ public final class PrettyPrint {
         pieces.add(p);
     }
 
-    private static int findTagEnd(String s, int lt) {
+    private static int findTagEnd(String s, int lt, Lexer lex) {
         int n = s.length();
         char quote = 0;
         for (int i = lt + 1; i < n; i++) {
+            if (lex.literal[i]) {
+                continue;
+            }
             char c = s.charAt(i);
             if (quote != 0) {
                 if (c == quote) {
@@ -607,6 +542,271 @@ public final class PrettyPrint {
     }
 
     // ---------------------------------------------------------------------
+    // GraphQL
+    // ---------------------------------------------------------------------
+
+    private static final int K_NONE = 0;
+    private static final int K_NAME = 1;
+    private static final int K_VALUE = 2;
+    private static final int K_OPEN_BRACE = 3;
+    private static final int K_CLOSE_BRACE = 4;
+    private static final int K_CLOSE_PAREN = 5;
+    private static final int K_COLON = 6;
+    private static final int K_COMMA = 7;
+    private static final int K_AT = 8;
+    private static final int K_SPREAD = 9;
+    private static final int K_PUNCT = 10;
+    private static final int K_COMMENT = 11;
+
+    /**
+     * Formats a GraphQL document: selection sets (the outermost braces are always nested on their
+     * own lines) with one field per line, while arguments and list/input-object values stay inline.
+     */
+    private static String graphql(String s) {
+        StringBuilder out = new StringBuilder(s.length() + 64);
+        Deque<Character> stack = new ArrayDeque<>();
+        int indent = 0;
+        int n = s.length();
+        int i = 0;
+        boolean atLineStart = true;
+        boolean pendingSpace = false;
+        String lastWord = null;
+        int lastKind = K_NONE;
+        while (i < n) {
+            char c = s.charAt(i);
+
+            if (c == '#') {
+                int e = i;
+                while (e < n && s.charAt(e) != '\n' && s.charAt(e) != '\r') {
+                    e++;
+                }
+                if (!atLineStart) {
+                    line(out, indent);
+                }
+                out.append(s, i, e);
+                line(out, indent);
+                atLineStart = true;
+                pendingSpace = false;
+                lastKind = K_COMMENT;
+                lastWord = null;
+                i = e;
+                continue;
+            }
+            if (c == '"') {
+                int e;
+                if (s.startsWith("\"\"\"", i)) {
+                    int k = s.indexOf("\"\"\"", i + 3);
+                    e = (k < 0) ? n : k + 3;
+                } else {
+                    e = endOfString(s, i, '"');
+                }
+                spaceBefore(out, pendingSpace, atLineStart, '\0');
+                out.append(s, i, e);
+                atLineStart = false;
+                pendingSpace = false;
+                lastKind = K_VALUE;
+                lastWord = null;
+                i = e;
+                continue;
+            }
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+                if (!atLineStart) {
+                    pendingSpace = true;
+                }
+                i++;
+                continue;
+            }
+            if (c == '{') {
+                if (!atLineStart) {
+                    char p = out.charAt(out.length() - 1);
+                    if (p != '(' && p != '[' && p != '{' && !Character.isWhitespace(p)) {
+                        out.append(' ');
+                    }
+                }
+                out.append('{');
+                stack.push('{');
+                indent++;
+                line(out, indent);
+                atLineStart = true;
+                pendingSpace = false;
+                lastKind = K_OPEN_BRACE;
+                lastWord = null;
+                i++;
+                continue;
+            }
+            if (c == '}') {
+                if (!stack.isEmpty()) {
+                    stack.pop();
+                }
+                indent = Math.max(0, indent - 1);
+                line(out, indent);
+                out.append('}');
+                atLineStart = false;
+                pendingSpace = false;
+                lastKind = K_CLOSE_BRACE;
+                lastWord = null;
+                if (stack.isEmpty()) {
+                    line(out, indent);
+                    atLineStart = true;
+                }
+                i++;
+                continue;
+            }
+            if (c == '(' || c == '[') {
+                spaceBefore(out, pendingSpace, atLineStart, '\0');
+                out.append(c);
+                stack.push(c);
+                atLineStart = false;
+                pendingSpace = false;
+                lastKind = K_PUNCT;
+                i++;
+                continue;
+            }
+            if (c == ')' || c == ']') {
+                if (!stack.isEmpty()) {
+                    stack.pop();
+                }
+                out.append(c);
+                atLineStart = false;
+                pendingSpace = false;
+                lastKind = K_CLOSE_PAREN;
+                lastWord = null;
+                i++;
+                continue;
+            }
+            if (c == ':') {
+                out.append(": ");
+                atLineStart = false;
+                pendingSpace = false;
+                lastKind = K_COLON;
+                lastWord = null;
+                i++;
+                continue;
+            }
+            if (c == ',') {
+                if (inSelection(stack)) {
+                    line(out, indent);
+                    atLineStart = true;
+                    pendingSpace = false;
+                } else {
+                    out.append(", ");
+                    atLineStart = false;
+                    pendingSpace = false;
+                }
+                lastKind = K_COMMA;
+                i++;
+                continue;
+            }
+            if (c == '@') {
+                spaceBefore(out, pendingSpace, atLineStart, '\0');
+                out.append('@');
+                atLineStart = false;
+                pendingSpace = false;
+                lastKind = K_AT;
+                lastWord = null;
+                i++;
+                continue;
+            }
+            if (c == '.' && i + 2 < n && s.charAt(i + 1) == '.' && s.charAt(i + 2) == '.') {
+                if (inSelection(stack) && breaksBefore(lastKind)) {
+                    line(out, indent);
+                } else {
+                    spaceBefore(out, pendingSpace, atLineStart, '\0');
+                }
+                out.append("...");
+                atLineStart = false;
+                pendingSpace = false;
+                lastKind = K_SPREAD;
+                lastWord = null;
+                i += 3;
+                continue;
+            }
+            if (c == '$') {
+                int e = i + 1;
+                while (e < n
+                        && (Character.isLetterOrDigit(s.charAt(e)) || s.charAt(e) == '_')) {
+                    e++;
+                }
+                spaceBefore(out, pendingSpace, atLineStart, '\0');
+                out.append(s, i, e);
+                atLineStart = false;
+                pendingSpace = false;
+                lastKind = K_VALUE;
+                lastWord = null;
+                i = e;
+                continue;
+            }
+            if (Character.isLetter(c) || c == '_') {
+                int e = i + 1;
+                while (e < n
+                        && (Character.isLetterOrDigit(s.charAt(e)) || s.charAt(e) == '_')) {
+                    e++;
+                }
+                String word = s.substring(i, e);
+                if (inSelection(stack) && breaksBefore(lastKind) && !"on".equals(lastWord)) {
+                    line(out, indent);
+                } else {
+                    spaceBefore(out, pendingSpace, atLineStart, '\0');
+                }
+                out.append(word);
+                atLineStart = false;
+                pendingSpace = false;
+                lastKind = K_NAME;
+                lastWord = word;
+                i = e;
+                continue;
+            }
+
+            spaceBefore(out, pendingSpace, atLineStart, '\0');
+            out.append(c);
+            atLineStart = false;
+            pendingSpace = false;
+            lastKind = K_VALUE;
+            lastWord = null;
+            i++;
+        }
+        return trimTrailing(out);
+    }
+
+    private static boolean inSelection(Deque<Character> stack) {
+        Character top = stack.peek();
+        return top != null && top == '{';
+    }
+
+    private static boolean breaksBefore(int kind) {
+        return kind == K_CLOSE_BRACE
+                || kind == K_NAME
+                || kind == K_VALUE
+                || kind == K_CLOSE_PAREN;
+    }
+
+    // ---------------------------------------------------------------------
+    // application/x-www-form-urlencoded
+    // ---------------------------------------------------------------------
+
+    /** Puts each form parameter on its own line. Multipart bodies are left untouched. */
+    private static String form(String s) {
+        if (s == null || s.isEmpty() || s.trim().startsWith("--")) {
+            return s;
+        }
+        StringBuilder out = new StringBuilder(s.length() + 16);
+        int start = 0;
+        int n = s.length();
+        for (int i = 0; i <= n; i++) {
+            if (i == n || s.charAt(i) == '&') {
+                if (i > start) {
+                    if (out.length() > 0) {
+                        out.append('\n');
+                    }
+                    out.append(s, start, i);
+                }
+                start = i + 1;
+            }
+        }
+        return out.length() == 0 ? s : out.toString();
+    }
+
+    // ---------------------------------------------------------------------
     // Shared helpers
     // ---------------------------------------------------------------------
 
@@ -638,6 +838,15 @@ public final class PrettyPrint {
         for (int i = 0; i < indent; i++) {
             out.append(INDENT);
         }
+    }
+
+    private static String trimTrailing(StringBuilder out) {
+        int l = out.length();
+        while (l > 0 && Character.isWhitespace(out.charAt(l - 1))) {
+            l--;
+        }
+        out.setLength(l);
+        return out.toString();
     }
 
     private static int nextNonWs(String s, int from) {

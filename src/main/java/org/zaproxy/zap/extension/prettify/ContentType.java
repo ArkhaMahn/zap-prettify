@@ -4,6 +4,7 @@ package org.zaproxy.zap.extension.prettify;
 public final class ContentType {
 
     public static final String FORM_STYLE = "prettify/form";
+    public static final String GRAPHQL_STYLE = "prettify/graphql";
     public static final String PLAIN_STYLE = "text/plain";
 
     private ContentType() {}
@@ -22,6 +23,9 @@ public final class ContentType {
         }
         if (ct.contains("x-www-form-urlencoded") || ct.contains("multipart/form-data")) {
             return FORM_STYLE;
+        }
+        if (ct.contains("graphql") && !ct.contains("json")) {
+            return GRAPHQL_STYLE;
         }
         if (ct.contains("json")) {
             return "text/json";
