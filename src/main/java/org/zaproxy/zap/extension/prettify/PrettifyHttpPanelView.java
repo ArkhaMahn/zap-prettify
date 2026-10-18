@@ -229,9 +229,9 @@ public class PrettifyHttpPanelView
         if (columns <= 0) {
             return 0;
         }
-        // Allow one extra column so the last character is not flush against the edge. The strict
-        // fit leaves a few pixels of slack, so the row still stays within the viewport.
-        return columns + 1;
+        // Allow two extra columns beyond the strict fit so the last character is not flush against
+        // the edge.
+        return columns + 2;
     }
 
     /**
