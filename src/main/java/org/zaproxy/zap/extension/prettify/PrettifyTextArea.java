@@ -1,10 +1,11 @@
 package org.zaproxy.zap.extension.prettify;
 
+import java.awt.Font;
+
 import org.fife.ui.rsyntaxtextarea.RSyntaxDocument;
 import org.fife.ui.rsyntaxtextarea.RSyntaxTextArea;
 import org.fife.ui.rsyntaxtextarea.TokenMakerFactory;
 import org.fife.ui.rtextarea.RTextAreaUI;
-import org.zaproxy.zap.utils.FontUtils;
 
 /**
  * An {@link RSyntaxTextArea} configured with the Prettify token maker factory and Burp's colour
@@ -32,10 +33,22 @@ public class PrettifyTextArea extends RSyntaxTextArea {
 
     private static final int MIN_EXTRA_LINE_HEIGHT = 2;
 
+    /**
+     * Burp Suite's default HTTP message font family. Burp does not bundle a font and instead uses
+     * this system monospaced font.
+     */
+    private static final String BURP_FONT_FAMILY = "Courier New";
+
+    /** Burp Suite's default HTTP message font size, in points. */
+    private static final int BURP_FONT_SIZE = 13;
+
     private static final TokenMakerFactory TOKEN_MAKER_FACTORY =
             new ContinuedStringTokenMakerFactory(new PrettifyTokenMakerFactory());
 
     private boolean dark;
+
+    /** Maps display offsets (which contain injected wrap breaks) back to the original text. */
+    private DisplayTextSplitter.Split split;
 
     public PrettifyTextArea(boolean dark) {
         this.dark = dark;
@@ -62,6 +75,42 @@ public class PrettifyTextArea extends RSyntaxTextArea {
         setClearWhitespaceLinesEnabled(false);
         setHighlightSecondaryLanguages(false);
         setUseFocusableTips(false);
+    }
+
+    /**
+     * Keeps the {@link DisplayTextSplitter.Split} that backs the current document, so a copy can be
+     * mapped back to the untouched message.
+     */
+    void setSplit(DisplayTextSplitter.Split split) {
+        this.split = split;
+    }
+
+    /**
+     * Copying must yield the text that was received, not the display text, so the synthetic line
+     * breaks inserted for wrapping are stripped: the selected display range is mapped back to the
+     * original text before it reaches the clipboard.
+     */
+    @Override
+    public String getSelectedText() {
+        DisplayTextSplitter.Split activeSplit = split;
+        int start = getSelectionStart();
+        int end = getSelectionEnd();
+        if (activeSplit == null || start >= end) {
+            return super.getSelectedText();
+        }
+        String original = activeSplit.originalText();
+        int originalStart = activeSplit.toOriginalOffset(start);
+        int originalEnd = activeSplit.toOriginalOffset(end);
+        if (originalStart < 0) {
+            originalStart = 0;
+        }
+        if (originalEnd > original.length()) {
+            originalEnd = original.length();
+        }
+        if (originalStart >= originalEnd) {
+            return "";
+        }
+        return original.substring(originalStart, originalEnd);
     }
 
     @Override
@@ -91,11 +140,20 @@ public class PrettifyTextArea extends RSyntaxTextArea {
         setSelectionColor(theme.getSelectionBackground());
         setSelectedTextColor(theme.getSelectionForeground());
         setSyntaxScheme(new BurpSyntaxScheme(theme));
-        // Derive the plain style: the wrapped syntax view overlaps its rows (and so
-        // garbles long wrapped lines) when the text area font is bold.
-        setFont(
-                FontUtils.getFontWithFallback(
-                                FontUtils.FontType.workPanels, getFont().getFontName())
-                        .deriveFont(java.awt.Font.PLAIN));
+        setFont(burpFont());
+    }
+
+    /**
+     * Burp Suite's default HTTP message font, independent of ZAP's configured "work panels" font.
+     * Plain style is forced because the wrapped syntax view overlaps its rows (and so garbles long
+     * wrapped lines) when the text area font is bold. Falls back to the platform monospaced font
+     * when {@value #BURP_FONT_FAMILY} is not installed.
+     */
+    private static Font burpFont() {
+        Font font = new Font(BURP_FONT_FAMILY, Font.PLAIN, BURP_FONT_SIZE);
+        if (!BURP_FONT_FAMILY.equalsIgnoreCase(font.getFamily())) {
+            font = new Font(Font.MONOSPACED, Font.PLAIN, BURP_FONT_SIZE);
+        }
+        return font;
     }
 }

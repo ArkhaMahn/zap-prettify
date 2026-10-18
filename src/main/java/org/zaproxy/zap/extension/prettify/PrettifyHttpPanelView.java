@@ -131,6 +131,7 @@ public class PrettifyHttpPanelView
         Message message = model.getMessage();
         final String data = model.getData();
         final String contentType = contentTypeOf(message);
+        final boolean stripTrailingNewlines = shouldStripTrailingNewlines(message);
         final int widthPx = wrapMaxWidthPx();
         final long gen = ++generation;
         wrappedWidthPx = widthPx;
@@ -139,9 +140,10 @@ public class PrettifyHttpPanelView
                 .submit(
                         () -> {
                             String raw = data;
-                            if (raw != null && isHeaderTarget()) {
-                                // Header-only views: drop the blank line ZAP keeps after the header
-                                // block. This is a display cleanup, not reformatting.
+                            if (raw != null && stripTrailingNewlines) {
+                                // Header-only views (and All views of a bodyless message) drop the
+                                // blank line that terminates the header block. A display cleanup,
+                                // not reformatting.
                                 raw = stripTrailingNewlines(raw);
                             }
                             prepareAndInstall(raw, styleFor(contentType), widthPx, gen);
@@ -176,6 +178,7 @@ public class PrettifyHttpPanelView
     private void install(DisplayTextSplitter.Split newSplit, RSyntaxDocument document) {
         split = newSplit;
         ChunkedTextLoader.installDocument(textArea, document, textArea::discardAllEdits);
+        textArea.setSplit(newSplit);
         applyLineNumbering(newSplit);
     }
 
@@ -314,6 +317,27 @@ public class PrettifyHttpPanelView
 
     private boolean isHeaderTarget() {
         return target == Target.REQUEST_HEAD || target == Target.RESPONSE_HEAD;
+    }
+
+    /**
+     * Whether trailing newlines should be dropped from the model text. A header block always ends
+     * with the blank-line terminator ({@code "\n\n"}); header-only views drop it, and so must an All
+     * view whose body is empty - otherwise that terminator trails the view as two blank lines. When
+     * a body is present the terminator is kept, as it separates the headers from the body.
+     */
+    private boolean shouldStripTrailingNewlines(Message message) {
+        if (isHeaderTarget()) {
+            return true;
+        }
+        if ((target != Target.REQUEST_ALL && target != Target.RESPONSE_ALL)
+                || !(message instanceof HttpMessage)) {
+            return false;
+        }
+        HttpMessage httpMessage = (HttpMessage) message;
+        if (target == Target.REQUEST_ALL) {
+            return httpMessage.getRequestBody().length() == 0;
+        }
+        return httpMessage.getResponseBody().length() == 0;
     }
 
     private String contentTypeOf(Message message) {
