@@ -141,6 +141,8 @@ public class ExtensionPrettify extends ExtensionAdaptor {
         safe(() -> panelManager.removeResponseViews("ResponseSplit", VIEW_RESPONSE_SPLIT_BODY, RequestSplitComponent.ViewComponent.BODY), "response body views");
         safe(() -> panelManager.removeRequestViews("RequestAll", VIEW_REQUEST_ALL, null), "request views");
         safe(() -> panelManager.removeResponseViews("ResponseAll", VIEW_RESPONSE_ALL, null), "response views");
+
+        PrettifyExecutor.shutdown();
     }
 
     /** Runs one removal, logging and continuing on failure so unload cannot stop half-way. */
