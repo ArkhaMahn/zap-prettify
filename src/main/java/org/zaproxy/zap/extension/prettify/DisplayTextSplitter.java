@@ -33,6 +33,73 @@ public final class DisplayTextSplitter {
 
     private DisplayTextSplitter() {}
 
+    /** Supplies the rendered width, in pixels, of a single code point. */
+    public interface CharWidths {
+        double widthOf(int codePoint);
+    }
+
+    /**
+     * Splits {@code string} into display lines that are no wider than {@code maxWidth} pixels,
+     * keeping whole existing lines and CR/LF pairs. Character-count wrapping is not safe for text
+     * with characters the font renders wider than a typical glyph (high-latin1/binary bodies,
+     * control pictures, etc.), so the break position is chosen from {@code widths}. If {@code
+     * maxWidth} is not positive this falls back to {@link #split(String)}.
+     */
+    public static Split split(String string, int maxWidth, CharWidths widths) {
+        if (maxWidth <= 0 || widths == null) {
+            return split(string);
+        }
+        if (string == null || string.isEmpty()) {
+            String s = string == null ? "" : string;
+            return new Split(s, s, new int[0]);
+        }
+        List<Integer> breakOffsets = new ArrayList<>();
+        int n = string.length();
+        StringBuilder display = new StringBuilder(n + n / 16 + 16);
+        int lineStart = 0;
+        for (int i = 0; i < n; i++) {
+            // Only '\n' (and '\r\n') separates lines in the text document; a lone '\r' is ordinary
+            // content. Breaking on it here would let the document merge the rows back together.
+            if (string.charAt(i) == '\n') {
+                appendLineByWidth(string, lineStart, i, maxWidth, widths, display, breakOffsets);
+                display.append('\n');
+                lineStart = i + 1;
+            }
+        }
+        appendLineByWidth(string, lineStart, n, maxWidth, widths, display, breakOffsets);
+        return new Split(display.toString(), string, toIntArray(breakOffsets));
+    }
+
+    private static void appendLineByWidth(
+            String string,
+            int start,
+            int end,
+            int maxWidth,
+            CharWidths widths,
+            StringBuilder display,
+            List<Integer> breakOffsets) {
+        int segmentStart = start;
+        double width = 0;
+        int i = start;
+        while (i < end) {
+            int cp = string.codePointAt(i);
+            double cw = widths.widthOf(cp);
+            // Always keep at least one code point per row, even if it alone is wider than maxWidth.
+            if (i > segmentStart && width + cw > maxWidth) {
+                display.append(string, segmentStart, i);
+                breakOffsets.add(display.length());
+                display.append('\n');
+                segmentStart = i;
+                width = 0;
+            }
+            width += cw;
+            i += Character.charCount(cp);
+        }
+        if (segmentStart < end) {
+            display.append(string, segmentStart, end);
+        }
+    }
+
     /**
      * Splits {@code string} into display lines no longer than {@code columns} characters, keeping
      * whole existing lines and CR/LF pairs. If {@code columns} is not positive this falls back to
@@ -51,14 +118,10 @@ public final class DisplayTextSplitter {
         StringBuilder display = new StringBuilder(n + n / columns + 16);
         int lineStart = 0;
         for (int i = 0; i < n; i++) {
-            char c = string.charAt(i);
-            if (c == '\n' || c == '\r') {
+            // Only '\n' (and '\r\n') separates lines; a lone '\r' is ordinary content.
+            if (string.charAt(i) == '\n') {
                 appendLineByColumns(string, lineStart, i, columns, display, breakOffsets);
-                display.append(c);
-                if (c == '\r' && i + 1 < n && string.charAt(i + 1) == '\n') {
-                    i++;
-                    display.append('\n');
-                }
+                display.append('\n');
                 lineStart = i + 1;
             }
         }
@@ -95,17 +158,11 @@ public final class DisplayTextSplitter {
         StringBuilder display = new StringBuilder(string.length() + 1024);
         int lineStart = 0;
         for (int i = 0; i < string.length(); i++) {
-            char c = string.charAt(i);
-            if (c == '\n' || c == '\r') {
+            // Only '\n' (and '\r\n') separates lines; a lone '\r' is ordinary content.
+            if (string.charAt(i) == '\n') {
                 copyChunked(string, lineStart, i, display, breakOffsets);
-                display.append(c);
+                display.append('\n');
                 lineStart = i + 1;
-                if (c == '\r'
-                        && lineStart < string.length()
-                        && string.charAt(lineStart) == '\n') {
-                    display.append('\n');
-                    lineStart++;
-                }
             }
         }
         copyChunked(string, lineStart, string.length(), display, breakOffsets);

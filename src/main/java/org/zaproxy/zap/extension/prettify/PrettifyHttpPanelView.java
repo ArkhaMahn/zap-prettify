@@ -71,11 +71,14 @@ public class PrettifyHttpPanelView
     /** Incremented on every request; stale background results are dropped against it. */
     private volatile long generation;
 
-    /** Wrap width (in columns) the current document was split for; 0 means "unknown". */
-    private int wrappedColumns = -1;
+    /** Wrap width (in pixels) the current document was split for; -1 means "unknown". */
+    private int wrappedWidthPx = -1;
 
     /** Debounces re-splitting while the panel is being resized. */
     private Timer resplitTimer;
+
+    /** Extra characters allowed beyond the strict wrap fit. */
+    private static final int EXTRA_WRAP_CHARS = 2;
 
     private String configurationKey = "";
 
@@ -128,9 +131,9 @@ public class PrettifyHttpPanelView
         Message message = model.getMessage();
         final String data = model.getData();
         final String contentType = contentTypeOf(message);
-        final int columns = wrapColumns();
+        final int widthPx = wrapMaxWidthPx();
         final long gen = ++generation;
-        wrappedColumns = columns;
+        wrappedWidthPx = widthPx;
 
         PrettifyExecutor.get()
                 .submit(
@@ -141,18 +144,19 @@ public class PrettifyHttpPanelView
                                 // block. This is a display cleanup, not reformatting.
                                 raw = stripTrailingNewlines(raw);
                             }
-                            prepareAndInstall(raw, styleFor(contentType), columns, gen);
+                            prepareAndInstall(raw, styleFor(contentType), widthPx, gen);
                         });
     }
 
     /**
-     * Off the EDT: pre-breaks the text at the wrap column, then builds the syntax document in slices
+     * Off the EDT: pre-breaks the text at the wrap width, then builds the syntax document in slices
      * (see {@link ChunkedTextLoader}) so the UI thread never tokenises a huge payload. The finished
      * document is then installed on the EDT.
      */
     private void prepareAndInstall(
-            final String text, final String style, final int columns, final long gen) {
-        final DisplayTextSplitter.Split newSplit = DisplayTextSplitter.split(text, columns);
+            final String text, final String style, final int widthPx, final long gen) {
+        final DisplayTextSplitter.Split newSplit =
+                DisplayTextSplitter.split(text, widthPx, charWidths());
         final RSyntaxDocument document =
                 ChunkedTextLoader.buildDocument(
                         newSplit.displayText(), style, () -> gen != generation);
@@ -193,11 +197,22 @@ public class PrettifyHttpPanelView
         }
     }
 
-    /** Number of characters that fit on one wrapped row, or 0 if the width is not known yet. */
-    private int wrapColumns() {
+    /**
+     * Wrap width in pixels, {@value #EXTRA_WRAP_CHARS} characters wider than what fits so the last
+     * character is not flush against the edge.
+     */
+    private int wrapMaxWidthPx() {
+        int width = wrapWidthPx();
+        if (width <= 0) {
+            return 0;
+        }
+        return width + EXTRA_WRAP_CHARS * (int) Math.ceil(charAdvance());
+    }
+
+    /** Width, in pixels, that a wrapped row may use, or 0 if the width is not known yet. */
+    private int wrapWidthPx() {
         // The viewport extent already excludes the vertical scrollbar when it is shown, so no
-        // scrollbar width is reserved; using the extent directly fits the maximum number of
-        // characters without spilling past the edge.
+        // scrollbar width is reserved; using the extent directly fills the row.
         int width = scrollPane.getViewport().getExtentSize().width;
         if (width <= 0) {
             width = scrollPane.getWidth();
@@ -213,25 +228,7 @@ public class PrettifyHttpPanelView
         if (margin != null) {
             width -= margin.left + margin.right;
         }
-        if (width <= 0) {
-            return 0;
-        }
-        double advance = charAdvance();
-        if (advance <= 0) {
-            return 0;
-        }
-        // Fill the viewport: take the largest column count whose width still fits, then re-check
-        // with a multiply so floating-point rounding can never let a row spill past the edge.
-        int columns = (int) Math.floor(width / advance);
-        while (columns > 1 && columns * advance > width) {
-            columns--;
-        }
-        if (columns <= 0) {
-            return 0;
-        }
-        // Allow one extra column beyond the strict fit so the last character is not flush against
-        // the edge.
-        return columns + 1;
+        return Math.max(0, width);
     }
 
     /**
@@ -250,9 +247,54 @@ public class PrettifyHttpPanelView
         return widest;
     }
 
+    /**
+     * Per-code-point rendered widths for the wrap. Characters the font does not have a monospaced
+     * glyph for (binary bodies, control pictures, CJK fallback, ...) are wider than {@code 'M'}, so
+     * wrapping by character count would overflow the viewport; the splitter wraps by these measured
+     * widths instead.
+     */
+    private DisplayTextSplitter.CharWidths charWidths() {
+        final Font font = textArea.getFont();
+        final FontRenderContext frc = new FontRenderContext(null, true, true);
+        // A tab advances to the next tab stop, i.e. at most TAB_SIZE columns; upper-bound it so a
+        // tab can never make a row overflow.
+        final double tabWidth = charAdvance() * PrettifyTextArea.TAB_SIZE;
+        return new DisplayTextSplitter.CharWidths() {
+            private final double[] cache = new double[0x10000];
+            private final java.util.HashMap<Integer, Double> wide =
+                    new java.util.HashMap<>();
+
+            @Override
+            public double widthOf(int codePoint) {
+                if (codePoint == '\t') {
+                    return tabWidth;
+                }
+                if (codePoint >= 0 && codePoint < 0x10000) {
+                    double w = cache[codePoint];
+                    if (w <= 0) {
+                        w = measure(codePoint, font, frc);
+                        cache[codePoint] = w;
+                    }
+                    return w;
+                }
+                Double w = wide.get(codePoint);
+                if (w == null) {
+                    w = measure(codePoint, font, frc);
+                    wide.put(codePoint, w);
+                }
+                return w;
+            }
+        };
+    }
+
+    private static double measure(int codePoint, Font font, FontRenderContext frc) {
+        String s = new String(Character.toChars(codePoint));
+        return font.getStringBounds(s, frc).getWidth();
+    }
+
     private void resplitIfWidthChanged() {
-        int columns = wrapColumns();
-        if (columns == 0 || columns == wrappedColumns) {
+        int widthPx = wrapMaxWidthPx();
+        if (widthPx <= 0 || widthPx == wrappedWidthPx) {
             return;
         }
         if (resplitTimer == null) {
