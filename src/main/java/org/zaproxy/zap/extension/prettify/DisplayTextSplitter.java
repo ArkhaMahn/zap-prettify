@@ -46,12 +46,30 @@ public final class DisplayTextSplitter {
      * maxWidth} is not positive this falls back to {@link #split(String)}.
      */
     public static Split split(String string, int maxWidth, CharWidths widths) {
+        return split(string, string, maxWidth, widths);
+    }
+
+    /**
+     * Splits {@code string} into display lines like {@link #split(String, int, CharWidths)}, but
+     * derives the gutter line numbers from {@code numberingSource} instead of from {@code string}.
+     *
+     * <p>This is used when {@code string} is a reformatted (pretty-printed) view of {@code
+     * numberingSource}: the pretty-printer only inserts and reflows whitespace, so the two texts
+     * have the same non-whitespace characters in the same order. Walking them together lets the
+     * gutter keep the <em>original</em> message line numbers - one number per original line, on its
+     * first display row - instead of numbering every line the formatter produced.
+     *
+     * @param numberingSource the original text whose line numbers the gutter should show; if null
+     *     or equal to {@code string} the normal (split) numbering is used
+     */
+    public static Split split(
+            String string, String numberingSource, int maxWidth, CharWidths widths) {
         if (maxWidth <= 0 || widths == null) {
             return split(string);
         }
         if (string == null || string.isEmpty()) {
             String s = string == null ? "" : string;
-            return new Split(s, s, new int[0]);
+            return new Split(s, s, new int[0], numberingSource);
         }
         List<Integer> breakOffsets = new ArrayList<>();
         int n = string.length();
@@ -67,7 +85,7 @@ public final class DisplayTextSplitter {
             }
         }
         appendLineByWidth(string, lineStart, n, maxWidth, widths, display, breakOffsets);
-        return new Split(display.toString(), string, toIntArray(breakOffsets));
+        return new Split(display.toString(), string, toIntArray(breakOffsets), numberingSource);
     }
 
     private static void appendLineByWidth(
@@ -295,6 +313,124 @@ public final class DisplayTextSplitter {
         return max;
     }
 
+    /**
+     * Picks the per-display-line numbers: when {@code numberingSource} is the same text that was
+     * split (the normal case) the numbers follow the display text's own newlines. When it differs
+     * (the split text is a pretty-printed view of it) the numbers are taken from the original text
+     * by aligning the two on their non-whitespace characters.
+     */
+    private static int[] computeDisplayLineNumbers(
+            String displayText, String splitText, int[] breakOffsets, String numberingSource) {
+        if (numberingSource == null || numberingSource.equals(splitText)) {
+            return buildDisplayLineNumbers(displayText, breakOffsets);
+        }
+        int[] formattedLineToOriginal = mapFormattedToOriginal(splitText, numberingSource);
+        if (formattedLineToOriginal == null) {
+            return buildDisplayLineNumbers(displayText, breakOffsets);
+        }
+        return lineNumbersFromMap(displayText, breakOffsets, formattedLineToOriginal);
+    }
+
+    /**
+     * Maps every line of {@code formatted} (0-based) to the 1-based line of {@code source} its first
+     * non-whitespace character came from, or {@code 0} for a line with no non-whitespace character.
+     *
+     * <p>The pretty-printer only ever adds, removes or reflows whitespace, so the two texts share
+     * the same non-whitespace characters in the same order; walking them together recovers which
+     * source line each formatted line belongs to. Returns {@code null} if they diverge (a formatter
+     * that is not whitespace-only), so callers fall back to ordinary numbering.
+     */
+    private static int[] mapFormattedToOriginal(String formatted, String source) {
+        int lines = 1;
+        for (int i = 0; i < formatted.length(); i++) {
+            if (formatted.charAt(i) == '\n') {
+                lines++;
+            }
+        }
+        int[] map = new int[lines];
+        int n = source.length();
+        int sourceIndex = 0;
+        int sourceLine = 1;
+        int formattedLine = 0;
+        boolean seenOnLine = false;
+        for (int i = 0; i < formatted.length(); i++) {
+            char c = formatted.charAt(i);
+            if (c == '\n') {
+                formattedLine++;
+                seenOnLine = false;
+                continue;
+            }
+            if (Character.isWhitespace(c)) {
+                continue;
+            }
+            while (sourceIndex < n && Character.isWhitespace(source.charAt(sourceIndex))) {
+                if (source.charAt(sourceIndex) == '\n') {
+                    sourceLine++;
+                }
+                sourceIndex++;
+            }
+            if (sourceIndex >= n || source.charAt(sourceIndex) != c) {
+                return null;
+            }
+            sourceIndex++;
+            if (!seenOnLine) {
+                map[formattedLine] = sourceLine;
+                seenOnLine = true;
+            }
+        }
+        return map;
+    }
+
+    /**
+     * Builds the per-display-line numbers from a formatted-line-to-original-line map: a display row
+     * is numbered only when it starts a formatted line that in turn starts a new original line, so
+     * each original message line is numbered exactly once (on its first display row) and every
+     * reformat and wrap continuation row is left blank.
+     */
+    private static int[] lineNumbersFromMap(
+            String displayText, int[] breakOffsets, int[] formattedLineToOriginal) {
+        int n = displayText.length();
+        int lines = 1;
+        for (int i = 0; i < n; i++) {
+            if (displayText.charAt(i) == '\n') {
+                lines++;
+            }
+        }
+        int[] numbers = new int[lines];
+        int previousOriginal = 0;
+        if (formattedLineToOriginal.length > 0 && formattedLineToOriginal[0] != 0) {
+            numbers[0] = formattedLineToOriginal[0];
+            previousOriginal = numbers[0];
+        }
+        int formattedLine = 0;
+        int breakIndex = 0;
+        int lineIndex = 0;
+        for (int i = 0; i < n; i++) {
+            if (displayText.charAt(i) != '\n') {
+                continue;
+            }
+            boolean injected = breakIndex < breakOffsets.length && breakOffsets[breakIndex] == i;
+            if (injected) {
+                breakIndex++;
+            } else {
+                formattedLine++;
+            }
+            lineIndex++;
+            if (injected) {
+                continue;
+            }
+            int original =
+                    formattedLine < formattedLineToOriginal.length
+                            ? formattedLineToOriginal[formattedLine]
+                            : 0;
+            if (original != 0 && original != previousOriginal) {
+                numbers[lineIndex] = original;
+                previousOriginal = original;
+            }
+        }
+        return numbers;
+    }
+
     /** The display text plus everything needed to map offsets back to the original text. */
     public static final class Split {
 
@@ -305,10 +441,15 @@ public final class DisplayTextSplitter {
         private final int originalLineCount;
 
         Split(String displayText, String originalText, int[] breakOffsets) {
+            this(displayText, originalText, breakOffsets, originalText);
+        }
+
+        Split(String displayText, String originalText, int[] breakOffsets, String numberingSource) {
             this.displayText = displayText;
             this.originalText = originalText;
             this.breakOffsets = breakOffsets;
-            this.displayLineNumbers = buildDisplayLineNumbers(displayText, breakOffsets);
+            this.displayLineNumbers =
+                    computeDisplayLineNumbers(displayText, originalText, breakOffsets, numberingSource);
             this.originalLineCount = countOriginalLines(displayLineNumbers);
         }
 

@@ -145,10 +145,17 @@ public class PrettifyHttpPanelView
                 .submit(
                         () -> {
                             String text = data;
-                            if (text != null) {
-                                text = format(text, contentType, stripTrailing);
+                            String numbering = data;
+                            if (data != null) {
+                                text = format(data, contentType, stripTrailing);
+                                // The gutter keeps the original message line numbers: pass the text
+                                // as it is without formatting (only the header-block cleanup) so
+                                // reformat-inserted lines are not numbered.
+                                numbering =
+                                        stripTrailing ? stripTrailingNewlines(data) : data;
                             }
-                            prepareAndInstall(text, styleFor(contentType, text), widthPx, gen);
+                            prepareAndInstall(
+                                    text, numbering, styleFor(contentType, text), widthPx, gen);
                         });
     }
 
@@ -176,9 +183,13 @@ public class PrettifyHttpPanelView
      * document is then installed on the EDT.
      */
     private void prepareAndInstall(
-            final String text, final String style, final int widthPx, final long gen) {
+            final String text,
+            final String numberingSource,
+            final String style,
+            final int widthPx,
+            final long gen) {
         final DisplayTextSplitter.Split newSplit =
-                DisplayTextSplitter.split(text, widthPx, charWidths());
+                DisplayTextSplitter.split(text, numberingSource, widthPx, charWidths());
         final RSyntaxDocument document =
                 ChunkedTextLoader.buildDocument(
                         newSplit.displayText(), style, newSplit, () -> gen != generation);
