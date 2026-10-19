@@ -72,6 +72,7 @@ public final class DisplayTextSplitter {
             return new Split(s, s, new int[0], numberingSource);
         }
         List<Integer> breakOffsets = new ArrayList<>();
+        List<Integer> breakIndents = new ArrayList<>();
         int n = string.length();
         StringBuilder display = new StringBuilder(n + n / 16 + 16);
         int lineStart = 0;
@@ -79,13 +80,20 @@ public final class DisplayTextSplitter {
             // Only '\n' (and '\r\n') separates lines in the text document; a lone '\r' is ordinary
             // content. Breaking on it here would let the document merge the rows back together.
             if (string.charAt(i) == '\n') {
-                appendLineByWidth(string, lineStart, i, maxWidth, widths, display, breakOffsets);
+                appendLineByWidth(
+                        string, lineStart, i, maxWidth, widths, display, breakOffsets, breakIndents);
                 display.append('\n');
                 lineStart = i + 1;
             }
         }
-        appendLineByWidth(string, lineStart, n, maxWidth, widths, display, breakOffsets);
-        return new Split(display.toString(), string, toIntArray(breakOffsets), numberingSource);
+        appendLineByWidth(
+                string, lineStart, n, maxWidth, widths, display, breakOffsets, breakIndents);
+        return new Split(
+                display.toString(),
+                string,
+                toIntArray(breakOffsets),
+                toIntArray(breakIndents),
+                numberingSource);
     }
 
     private static void appendLineByWidth(
@@ -95,7 +103,15 @@ public final class DisplayTextSplitter {
             int maxWidth,
             CharWidths widths,
             StringBuilder display,
-            List<Integer> breakOffsets) {
+            List<Integer> breakOffsets,
+            List<Integer> breakIndents) {
+        // Continuation rows are indented to the wrapped line's own indentation level so a wrapped
+        // value does not snap back to column zero but stays under the block it belongs to.
+        int indentLength = leadingIndentLength(string, start, end);
+        double indentWidth = 0;
+        for (int k = start; k < start + indentLength; k++) {
+            indentWidth += widths.widthOf(string.codePointAt(k));
+        }
         int segmentStart = start;
         double width = 0;
         int i = start;
@@ -107,8 +123,12 @@ public final class DisplayTextSplitter {
                 display.append(string, segmentStart, i);
                 breakOffsets.add(display.length());
                 display.append('\n');
+                if (indentLength > 0) {
+                    display.append(string, start, start + indentLength);
+                }
+                breakIndents.add(indentLength);
                 segmentStart = i;
-                width = 0;
+                width = indentWidth;
             }
             width += cw;
             i += Character.charCount(cp);
@@ -116,6 +136,19 @@ public final class DisplayTextSplitter {
         if (segmentStart < end) {
             display.append(string, segmentStart, end);
         }
+    }
+
+    /** Length of the leading run of spaces/tabs on the line {@code [start, end)}. */
+    private static int leadingIndentLength(String string, int start, int end) {
+        int i = start;
+        while (i < end) {
+            char c = string.charAt(i);
+            if (c != ' ' && c != '\t') {
+                break;
+            }
+            i++;
+        }
+        return i - start;
     }
 
     /**
@@ -437,17 +470,28 @@ public final class DisplayTextSplitter {
         private final String displayText;
         private final String originalText;
         private final int[] breakOffsets;
+        private final int[] breakIndents;
         private final int[] displayLineNumbers;
         private final int originalLineCount;
 
         Split(String displayText, String originalText, int[] breakOffsets) {
-            this(displayText, originalText, breakOffsets, originalText);
+            this(displayText, originalText, breakOffsets, new int[breakOffsets.length], originalText);
         }
 
         Split(String displayText, String originalText, int[] breakOffsets, String numberingSource) {
+            this(displayText, originalText, breakOffsets, new int[breakOffsets.length], numberingSource);
+        }
+
+        Split(
+                String displayText,
+                String originalText,
+                int[] breakOffsets,
+                int[] breakIndents,
+                String numberingSource) {
             this.displayText = displayText;
             this.originalText = originalText;
             this.breakOffsets = breakOffsets;
+            this.breakIndents = breakIndents;
             this.displayLineNumbers =
                     computeDisplayLineNumbers(displayText, originalText, breakOffsets, numberingSource);
             this.originalLineCount = countOriginalLines(displayLineNumbers);
@@ -474,6 +518,14 @@ public final class DisplayTextSplitter {
         }
 
         /**
+         * Number of indentation characters injected right after each inserted break (see {@link
+         * #breakOffsets()}), so a wrapped continuation row lines up with the line's indentation.
+         */
+        public int[] breakIndents() {
+            return breakIndents;
+        }
+
+        /**
          * For each 0-based display line, the 1-based original message line it belongs to, or {@code
          * 0} if it is a continuation row created by a break.
          */
@@ -486,30 +538,47 @@ public final class DisplayTextSplitter {
             return originalLineCount;
         }
 
-        /** Maps a display offset back to the offset in the untouched original text. */
+        /**
+         * Maps a display offset back to the offset in the untouched original text, dropping every
+         * character the split inserted - both the line breaks and the indentation copied onto the
+         * continuation rows.
+         */
         public int toOriginalOffset(int offset) {
             int dropped = 0;
-            for (int breakOffset : breakOffsets) {
+            for (int i = 0; i < breakOffsets.length; i++) {
+                int breakOffset = breakOffsets[i];
                 if (breakOffset >= offset) {
                     break;
                 }
-                dropped++;
+                int block = 1 + indentAt(i);
+                int inBlock = Math.min(offset - breakOffset, block);
+                dropped += inBlock;
+                if (offset < breakOffset + block) {
+                    break;
+                }
             }
             return offset - dropped;
         }
 
         /** Maps an original offset forward to the offset in the display text. */
         public int toDisplayOffset(int offset) {
-            int display = Math.max(0, Math.min(offset, originalText.length()));
-            int previous = 0;
-            for (int breakOffset : breakOffsets) {
-                if (breakOffset - previous > display) {
+            int original = Math.max(0, Math.min(offset, originalText.length()));
+            int display = original;
+            int injectedBefore = 0;
+            for (int i = 0; i < breakOffsets.length; i++) {
+                int originalAtBreak = breakOffsets[i] - injectedBefore;
+                if (originalAtBreak > original) {
                     break;
                 }
-                display++;
-                previous++;
+                int block = 1 + indentAt(i);
+                display += block;
+                injectedBefore += block;
             }
             return Math.min(display, displayText.length());
+        }
+
+        private int indentAt(int breakIndex) {
+            return breakIndex < breakIndents.length ? breakIndents[breakIndex] : 0;
         }
 
         @Override
