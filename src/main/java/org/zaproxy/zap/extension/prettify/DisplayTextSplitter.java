@@ -325,6 +325,14 @@ public final class DisplayTextSplitter {
         }
 
         /**
+         * Display-text offsets of the {@code '\n'} characters inserted by the split, in ascending
+         * order. The row that follows a break starts at {@code breakOffsets()[i] + 1}.
+         */
+        public int[] breakOffsets() {
+            return breakOffsets;
+        }
+
+        /**
          * For each 0-based display line, the 1-based original message line it belongs to, or {@code
          * 0} if it is a continuation row created by a break.
          */

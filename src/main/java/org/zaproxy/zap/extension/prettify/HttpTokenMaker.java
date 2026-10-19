@@ -13,23 +13,59 @@ import org.fife.ui.rsyntaxtextarea.TokenTypes;
  * (including cookies) and, for a full message, delegates the body to the appropriate RSTA token
  * maker selected from the {@code Content-Type} header.
  *
- * <p>The header/body boundary is carried from one line to the next through the token type of the
- * zero-length end-of-line token returned by {@link #getTokenList}.
+ * <p>The wrap applied by {@link DisplayTextSplitter} inserts hard line breaks into overlong logical
+ * lines. A wrapping continuation therefore starts in the middle of an HTTP construct (a header
+ * value, a cookie value, a request target, ...). To colour those continuation rows correctly this
+ * token maker is a small streaming lexer: the token type of the zero-length end-of-line token
+ * carries the lexer state at the cut point, so the next display line can resume the construct
+ * instead of mis-reading the fragment as a brand new header. {@link PrettifyDocument} supplies the
+ * complementary information - whether a line actually continues the previous one - by resetting the
+ * carried state to {@link #S_HDR_START} at every real (non-continuation) line boundary.
  */
 public abstract class HttpTokenMaker extends AbstractTokenMaker {
 
-    /** State meaning "the next line is still part of the header block". */
-    private static final int HEADERS_STATE = -1;
+    /** State meaning "the next line starts a fresh header line (or the blank line before a body)". */
+    static final int S_HDR_START = -1;
+
+    /** State meaning "still inside the request method (or between method and target)". */
+    static final int S_REQ_METHOD = -2;
+
+    /** State meaning "still inside the request-target path". */
+    static final int S_REQ_TARGET = -3;
+
+    /** State meaning "inside a query-string parameter name". */
+    static final int S_REQ_QUERY_NAME = -4;
+
+    /** State meaning "inside a query-string parameter value". */
+    static final int S_REQ_QUERY_VALUE = -5;
+
+    /** State meaning "inside the HTTP version / trailing part of the first line". */
+    static final int S_REQ_VERSION = -6;
+
+    /** State meaning "inside a response status line". */
+    static final int S_RES_LINE = -7;
+
+    /** State meaning "inside a header field name". */
+    static final int S_HDR_NAME = -8;
+
+    /** State meaning "inside a plain header field value". */
+    static final int S_HDR_VALUE = -9;
+
+    /** State meaning "inside a cookie attribute name". */
+    static final int S_COOKIE_NAME = -10;
+
+    /** State meaning "inside a cookie attribute value". */
+    static final int S_COOKIE_VALUE = -11;
 
     /**
      * Base used to encode the body delegate state in the end-of-line token type. Values are kept
      * negative because RSTA only treats tokens with a positive type as paintable/measurable, so a
      * synthetic (non-token-type) state must never be positive.
      */
-    private static final int BODY_BASE = -10_000_000;
+    static final int BODY_BASE = -10_000_000;
 
     /** Any line state at or below this value is an encoded body state. */
-    private static final int BODY_DETECT = -9_000_000;
+    static final int BODY_DETECT = -9_000_000;
 
     private final boolean response;
     private final boolean headersOnly;
@@ -38,13 +74,26 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
     private int lineOff;
     private int lineStart;
 
-    private String bodyStyleKey;
+    private final StringBuilder hdrName = new StringBuilder();
+    private final StringBuilder contentTypeValue = new StringBuilder();
+    private boolean contentTypeHeader;
+    private String bodyContentType;
+
     private TokenMaker bodyTokenMaker;
     private boolean bodyResolved;
 
     protected HttpTokenMaker(boolean response, boolean headersOnly) {
         this.response = response;
         this.headersOnly = headersOnly;
+    }
+
+    /**
+     * Maps a carried line state to the state that a following real (non-continuation) line must
+     * start from. Header-region construct states collapse to a fresh header line; body delegate
+     * states are passed through unchanged so the delegate keeps its own multi-line context.
+     */
+    static int resetAfterLine(int state) {
+        return state <= BODY_DETECT ? state : S_HDR_START;
     }
 
     @Override
@@ -66,101 +115,140 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
         }
 
         if (initialTokenType == 0) {
-            // First line of the document: reset any body content-type detected previously.
-            this.bodyStyleKey = null;
-            this.bodyTokenMaker = null;
-            this.bodyResolved = false;
-
-            if (response) {
-                tokenizeResponseLine(end);
-            } else {
-                tokenizeRequestLine(end);
-            }
-            endLine(HEADERS_STATE);
-        } else if (!headersOnly && isBlank(text.offset, end)) {
-            // Blank line separating headers from body.
-            endLine(BODY_BASE);
-        } else {
-            tokenizeHeader(text.offset, end);
-            endLine(HEADERS_STATE);
+            int state =
+                    response
+                            ? tokenizeStatusLine(lineOff, end)
+                            : tokenizeRequestLine(lineOff, end, S_REQ_METHOD);
+            endLine(state);
+            return firstToken;
         }
 
+        if (isRequestLineState(initialTokenType)) {
+            endLine(tokenizeRequestLine(lineOff, end, initialTokenType));
+            return firstToken;
+        }
+        if (initialTokenType == S_RES_LINE) {
+            endLine(tokenizeStatusLine(lineOff, end));
+            return firstToken;
+        }
+
+        // Header block: either a fresh header line or a continuation of a header construct.
+        if (initialTokenType == S_HDR_START) {
+            if (isBlank(lineOff, end)) {
+                // Blank line separating headers from body.
+                finalizeContentType();
+                endLine(headersOnly ? S_HDR_START : BODY_BASE);
+                return firstToken;
+            }
+            hdrName.setLength(0);
+        }
+
+        endLine(tokenizeHeaderFragment(lineOff, end, initialTokenType));
         return firstToken;
     }
 
-    private void tokenizeRequestLine(int end) {
-        int p = lineOff;
-        int e1 = indexOfSpace(p, end);
-        emit(p, e1 - 1, BurpTokenTypes.HTTP_FIRST_LINE);
-        p = skipSpaces(e1, end, true);
-
-        int e2 = indexOfSpace(p, end);
-        tokenizeTarget(p, e2);
-        p = skipSpaces(e2, end, true);
-
-        if (p < end) {
-            emit(p, end - 1, BurpTokenTypes.HTTP_FIRST_LINE);
+    private static boolean isRequestLineState(int state) {
+        switch (state) {
+            case S_REQ_METHOD:
+            case S_REQ_TARGET:
+            case S_REQ_QUERY_NAME:
+            case S_REQ_QUERY_VALUE:
+            case S_REQ_VERSION:
+                return true;
+            default:
+                return false;
         }
     }
 
-    private void tokenizeTarget(int start, int end) {
-        if (start >= end) {
-            return;
-        }
-        int pathEnd = end;
-        int qm = indexOf('?', start, end);
-        int hash = indexOf('#', start, end);
-        if (qm >= 0 && qm < pathEnd) {
-            pathEnd = qm;
-        }
-        if (hash >= 0 && hash < pathEnd) {
-            pathEnd = hash;
-        }
+    // -- Request line -------------------------------------------------------------------------
 
-        emit(start, pathEnd - 1, BurpTokenTypes.HTTP_FIRST_LINE);
-        if (pathEnd >= end) {
-            return;
-        }
-
-        char c = arr[pathEnd];
-        emit(pathEnd, pathEnd, BurpTokenTypes.HTTP_FIRST_LINE);
-        int rest = pathEnd + 1;
-        if (c == '?') {
-            int frag = (hash >= 0) ? hash : end;
-            tokenizeQuery(rest, frag);
-            if (frag < end) {
-                emit(frag, frag, BurpTokenTypes.HTTP_FIRST_LINE);
-                emit(frag + 1, end - 1, BurpTokenTypes.HTTP_FIRST_LINE);
-            }
-        } else {
-            emit(rest, end - 1, BurpTokenTypes.HTTP_FIRST_LINE);
-        }
-    }
-
-    private void tokenizeQuery(int start, int end) {
-        int p = start;
+    /**
+     * Tokenises a request line, or the continuation of one, starting in {@code state}. Returns the
+     * lexer state at the end of the fragment so the next display line can resume.
+     */
+    private int tokenizeRequestLine(int p, int end, int state) {
         while (p < end) {
-            int amp = indexOf('&', p, end);
-            int segEnd = (amp >= 0) ? amp : end;
-            int eq = indexOf('=', p, segEnd);
-            if (eq >= 0) {
-                emit(p, eq - 1, BurpTokenTypes.HTTP_PARAMETER_NAME);
-                emit(eq, eq, TokenTypes.OPERATOR);
-                emit(eq + 1, segEnd - 1, BurpTokenTypes.HTTP_PARAMETER_VALUE);
+            if (state == S_REQ_METHOD || state == S_REQ_TARGET || state == S_REQ_VERSION) {
+                boolean stopAtQuery = state == S_REQ_TARGET;
+                int s = p;
+                while (p < end && !isSpace(arr[p]) && !(stopAtQuery && arr[p] == '?')) {
+                    p++;
+                }
+                emit(s, p - 1, BurpTokenTypes.HTTP_FIRST_LINE);
+                if (p >= end) {
+                    break;
+                }
+                if (stopAtQuery && arr[p] == '?') {
+                    emit(p, p, BurpTokenTypes.HTTP_FIRST_LINE);
+                    p++;
+                    state = S_REQ_QUERY_NAME;
+                } else {
+                    int ws = p;
+                    while (p < end && isSpace(arr[p])) {
+                        p++;
+                    }
+                    emit(ws, p - 1, TokenTypes.WHITESPACE);
+                    state = (state == S_REQ_METHOD) ? S_REQ_TARGET : S_REQ_VERSION;
+                }
+            } else if (state == S_REQ_QUERY_NAME) {
+                int s = p;
+                while (p < end && arr[p] != '=' && arr[p] != '&' && !isSpace(arr[p])) {
+                    p++;
+                }
+                emit(s, p - 1, BurpTokenTypes.HTTP_PARAMETER_NAME);
+                if (p >= end) {
+                    break;
+                }
+                char c = arr[p];
+                if (c == '=') {
+                    emit(p, p, TokenTypes.OPERATOR);
+                    p++;
+                    state = S_REQ_QUERY_VALUE;
+                } else if (c == '&') {
+                    emit(p, p, TokenTypes.SEPARATOR);
+                    p++;
+                    state = S_REQ_QUERY_NAME;
+                } else {
+                    state = consumeTrailingSpaces(p, end);
+                    p = end;
+                }
+            } else if (state == S_REQ_QUERY_VALUE) {
+                int s = p;
+                while (p < end && arr[p] != '&' && !isSpace(arr[p])) {
+                    p++;
+                }
+                emit(s, p - 1, BurpTokenTypes.HTTP_PARAMETER_VALUE);
+                if (p >= end) {
+                    break;
+                }
+                if (arr[p] == '&') {
+                    emit(p, p, TokenTypes.SEPARATOR);
+                    p++;
+                    state = S_REQ_QUERY_NAME;
+                } else {
+                    state = consumeTrailingSpaces(p, end);
+                    p = end;
+                }
             } else {
-                emit(p, segEnd - 1, BurpTokenTypes.HTTP_PARAMETER_NAME);
-            }
-            if (amp >= 0) {
-                emit(amp, amp, TokenTypes.SEPARATOR);
-                p = amp + 1;
-            } else {
-                p = end;
+                break;
             }
         }
+        return state;
     }
 
-    private void tokenizeResponseLine(int end) {
-        int p = lineOff;
+    /** Emits a whitespace run from {@code p} to {@code end} and returns {@link #S_REQ_VERSION}. */
+    private int consumeTrailingSpaces(int p, int end) {
+        int ws = p;
+        while (p < end && isSpace(arr[p])) {
+            p++;
+        }
+        emit(ws, p - 1, TokenTypes.WHITESPACE);
+        return S_REQ_VERSION;
+    }
+
+    // -- Response status line -----------------------------------------------------------------
+
+    private int tokenizeStatusLine(int p, int end) {
         while (p < end) {
             int s = p;
             while (p < end && !isSpace(arr[p])) {
@@ -173,80 +261,148 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
             }
             emit(ws, p - 1, TokenTypes.WHITESPACE);
         }
+        return S_RES_LINE;
     }
 
-    private void tokenizeHeader(int start, int end) {
-        int p = start;
+    // -- Headers ------------------------------------------------------------------------------
+
+    private int tokenizeHeaderFragment(int p, int end, int state) {
+        if (state == S_HDR_START || state == S_HDR_NAME) {
+            if (state == S_HDR_START) {
+                int ws = p;
+                while (p < end && isSpace(arr[p])) {
+                    p++;
+                }
+                emit(ws, p - 1, TokenTypes.WHITESPACE);
+            }
+            int s = p;
+            while (p < end && arr[p] != ':') {
+                hdrName.append(arr[p]);
+                p++;
+            }
+            emit(s, p - 1, BurpTokenTypes.HTTP_HEADER_NAME);
+            if (p >= end) {
+                return S_HDR_NAME;
+            }
+            // ':'
+            emit(p, p, TokenTypes.SEPARATOR);
+            p++;
+            state = startHeaderValue();
+            if (state == S_COOKIE_NAME) {
+                int ws = p;
+                while (p < end && isSpace(arr[p])) {
+                    p++;
+                }
+                emit(ws, p - 1, TokenTypes.WHITESPACE);
+            }
+        }
+
+        if (state == S_HDR_VALUE) {
+            int ws = p;
+            while (p < end && isSpace(arr[p])) {
+                p++;
+            }
+            emit(ws, p - 1, TokenTypes.WHITESPACE);
+            if (contentTypeHeader && p < end) {
+                contentTypeValue.append(arr, p, end - p);
+            }
+            emit(p, end - 1, BurpTokenTypes.HTTP_HEADER_VALUE);
+            return S_HDR_VALUE;
+        }
+
+        if (state == S_COOKIE_NAME || state == S_COOKIE_VALUE) {
+            return tokenizeCookieFragment(p, end, state);
+        }
+
+        emit(p, end - 1, BurpTokenTypes.HTTP_HEADER_VALUE);
+        return S_HDR_VALUE;
+    }
+
+    /** Decides, from the accumulated header field name, how its value is tokenised. */
+    private int startHeaderValue() {
+        String name = hdrName.toString().trim().toLowerCase();
+        if ("cookie".equals(name) || "set-cookie".equals(name)) {
+            finalizeContentType();
+            contentTypeHeader = false;
+            return S_COOKIE_NAME;
+        }
+        boolean isContentType = "content-type".equals(name);
+        if (!isContentType) {
+            finalizeContentType();
+        }
+        contentTypeHeader = isContentType;
+        if (isContentType) {
+            contentTypeValue.setLength(0);
+        }
+        return S_HDR_VALUE;
+    }
+
+    /**
+     * Snapshots the value of the content-type header, if one is currently being read, so the body
+     * delegate can be chosen later even when other headers (such as content-length) follow it.
+     */
+    private void finalizeContentType() {
+        if (contentTypeHeader) {
+            bodyContentType = contentTypeValue.toString().trim();
+        }
+    }
+
+    private int tokenizeCookieFragment(int p, int end, int state) {
+        while (p < end) {
+            if (state == S_COOKIE_NAME) {
+                int ws = p;
+                while (p < end && isSpace(arr[p])) {
+                    p++;
+                }
+                emit(ws, p - 1, TokenTypes.WHITESPACE);
+                int s = p;
+                while (p < end && arr[p] != '=' && arr[p] != ';') {
+                    p++;
+                }
+                emit(s, p - 1, BurpTokenTypes.HTTP_PARAMETER_NAME);
+                if (p >= end) {
+                    break;
+                }
+                if (arr[p] == '=') {
+                    emit(p, p, TokenTypes.OPERATOR);
+                    p++;
+                    state = S_COOKIE_VALUE;
+                } else {
+                    emit(p, p, TokenTypes.SEPARATOR);
+                    p = skipCookieSpaces(p + 1, end);
+                    state = S_COOKIE_NAME;
+                }
+            } else {
+                int s = p;
+                while (p < end && arr[p] != ';') {
+                    p++;
+                }
+                emit(s, p - 1, BurpTokenTypes.HTTP_PARAMETER_VALUE);
+                if (p >= end) {
+                    break;
+                }
+                emit(p, p, TokenTypes.SEPARATOR);
+                p = skipCookieSpaces(p + 1, end);
+                state = S_COOKIE_NAME;
+            }
+        }
+        return state;
+    }
+
+    /** Emits the whitespace that follows a cookie ';' separator and returns the next position. */
+    private int skipCookieSpaces(int p, int end) {
+        int ws = p;
         while (p < end && isSpace(arr[p])) {
             p++;
         }
-        emit(start, p - 1, TokenTypes.WHITESPACE);
-
-        int colon = indexOf(':', p, end);
-        if (colon < 0) {
-            emit(p, end - 1, BurpTokenTypes.HTTP_HEADER_NAME);
-            return;
-        }
-        emit(p, colon - 1, BurpTokenTypes.HTTP_HEADER_NAME);
-        emit(colon, colon, TokenTypes.SEPARATOR);
-
-        int vs = colon + 1;
-        while (vs < end && isSpace(arr[vs])) {
-            vs++;
-        }
-        emit(colon + 1, vs - 1, TokenTypes.WHITESPACE);
-
-        if (vs >= end) {
-            return;
-        }
-        String name = new String(arr, p, colon - p).trim().toLowerCase();
-        if ("cookie".equals(name) || "set-cookie".equals(name)) {
-            tokenizeCookies(vs, end);
-        } else {
-            emit(vs, end - 1, BurpTokenTypes.HTTP_HEADER_VALUE);
-        }
-        if ("content-type".equals(name)) {
-            this.bodyStyleKey = ContentType.styleKeyFor(new String(arr, vs, end - vs).trim());
-        }
+        emit(ws, p - 1, TokenTypes.WHITESPACE);
+        return p;
     }
 
-    private void tokenizeCookies(int start, int end) {
-        int p = start;
-        while (p < end) {
-            int semi = indexOf(';', p, end);
-            int segEnd = (semi >= 0) ? semi : end;
-
-            int s = p;
-            while (s < segEnd && isSpace(arr[s])) {
-                s++;
-            }
-            emit(p, s - 1, TokenTypes.WHITESPACE);
-
-            int e = segEnd;
-            while (e > s && isSpace(arr[e - 1])) {
-                e--;
-            }
-            if (e > s) {
-                int eq = indexOf('=', s, e);
-                if (eq >= 0) {
-                    emit(s, eq - 1, BurpTokenTypes.HTTP_PARAMETER_NAME);
-                    emit(eq, eq, TokenTypes.OPERATOR);
-                    emit(eq + 1, e - 1, BurpTokenTypes.HTTP_PARAMETER_VALUE);
-                } else {
-                    emit(s, e - 1, BurpTokenTypes.HTTP_PARAMETER_NAME);
-                }
-            }
-            if (semi >= 0) {
-                emit(semi, semi, TokenTypes.SEPARATOR);
-                p = semi + 1;
-            } else {
-                p = end;
-            }
-        }
-    }
+    // -- Body ---------------------------------------------------------------------------------
 
     private Token tokenizeBody(Segment text, int delegateState, int startOffset) {
-        TokenMaker dm = getBodyTokenMaker();
+        TokenMaker dm = getBodyTokenMaker(text);
         if (dm == null) {
             if (text.count > 0) {
                 addToken(
@@ -261,7 +417,6 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
         }
 
         Token list = dm.getTokenList(text, delegateState, startOffset);
-        int state = 0;
         Token t = list;
         while (t != null) {
             int len = t.length();
@@ -269,26 +424,44 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
             if (len > 0 && ta != null) {
                 addToken(ta, t.getTextOffset(), t.getTextOffset() + len - 1, t.getType(), t.getOffset());
             }
-            state = t.getType();
             t = t.getNextToken();
         }
+        // Carry the delegate's line state, not the last token type: a string cut by a wrap break is
+        // signalled through the state (the ContinuedStringTokenMaker marker), not the token list.
+        int state = dm.getLastTokenTypeOnLine(text, delegateState);
         endLine(BODY_BASE - state);
         return firstToken;
     }
 
-    private TokenMaker getBodyTokenMaker() {
+    private TokenMaker getBodyTokenMaker(Segment firstLine) {
         if (!bodyResolved) {
             bodyResolved = true;
-            if (bodyStyleKey == null || "text/plain".equals(bodyStyleKey)) {
+            String styleKey = ContentType.styleKeyFor(bodyContentType, prefixOf(firstLine));
+            if (styleKey == null || ContentType.PLAIN_STYLE.equals(styleKey)) {
                 bodyTokenMaker = null;
-            } else if ("prettify/form".equals(bodyStyleKey)) {
+            } else if (ContentType.FORM_STYLE.equals(styleKey)) {
                 bodyTokenMaker = new FormUrlEncodedTokenMaker();
             } else {
-                bodyTokenMaker = TokenMakerFactory.getDefaultInstance().getTokenMaker(bodyStyleKey);
+                // Wrap the delegate so a string that a wrap break cuts in half stays a string on the
+                // continuation rows, exactly as it does for a body-only view whose document token
+                // maker is itself wrapped.
+                bodyTokenMaker =
+                        new ContinuedStringTokenMaker(
+                                TokenMakerFactory.getDefaultInstance().getTokenMaker(styleKey));
             }
         }
         return bodyTokenMaker;
     }
+
+    /** The body's leading text, used to sniff a style when the content type is not decisive. */
+    private static String prefixOf(Segment text) {
+        if (text == null || text.count <= 0) {
+            return "";
+        }
+        return new String(text.array, text.offset, Math.min(text.count, 4096));
+    }
+
+    // -- Shared helpers -----------------------------------------------------------------------
 
     private void endLine(int state) {
         addNullToken();
@@ -304,34 +477,6 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
         addToken(arr, start, endInclusive, type, lineStart + (start - lineOff));
     }
 
-    private int skipSpaces(int p, int end, boolean emitWhitespace) {
-        int s = p;
-        while (p < end && isSpace(arr[p])) {
-            p++;
-        }
-        if (emitWhitespace) {
-            emit(s, p - 1, TokenTypes.WHITESPACE);
-        }
-        return p;
-    }
-
-    private int indexOfSpace(int start, int end) {
-        int p = start;
-        while (p < end && !isSpace(arr[p])) {
-            p++;
-        }
-        return p;
-    }
-
-    private int indexOf(char c, int start, int end) {
-        for (int p = start; p < end; p++) {
-            if (arr[p] == c) {
-                return p;
-            }
-        }
-        return -1;
-    }
-
     private boolean isBlank(int start, int end) {
         for (int p = start; p < end; p++) {
             if (!isSpace(arr[p])) {
@@ -342,6 +487,6 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
     }
 
     private static boolean isSpace(char c) {
-        return c == ' ' || c == '\t';
+        return c == ' ' || c == '\t' || c == '\r';
     }
 }

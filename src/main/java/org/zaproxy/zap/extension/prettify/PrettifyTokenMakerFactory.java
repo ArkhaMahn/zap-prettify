@@ -22,6 +22,17 @@ public class PrettifyTokenMakerFactory extends AbstractTokenMakerFactory {
 
     public PrettifyTokenMakerFactory() {}
 
+    /**
+     * Whether {@code key} selects one of the custom HTTP token makers (rather than an RSTA body
+     * token maker). HTTP documents need {@link PrettifyDocument}'s continuation-aware state.
+     */
+    public static boolean isHttpStyle(String key) {
+        return STYLE_HTTP_REQUEST.equals(key)
+                || STYLE_HTTP_RESPONSE.equals(key)
+                || STYLE_HTTP_REQUEST_HEAD.equals(key)
+                || STYLE_HTTP_RESPONSE_HEAD.equals(key);
+    }
+
     @Override
     protected void initTokenMakerMap() {
         // Mappings are resolved directly in getTokenMakerImpl.

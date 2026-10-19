@@ -4,6 +4,7 @@ import java.util.function.BooleanSupplier;
 import javax.swing.text.BadLocationException;
 import javax.swing.text.JTextComponent;
 import org.fife.ui.rsyntaxtextarea.RSyntaxDocument;
+import org.fife.ui.rsyntaxtextarea.TokenMakerFactory;
 
 /**
  * Builds an {@link RSyntaxDocument} off the Event Dispatch Thread in fixed-size slices, so that a
@@ -29,13 +30,21 @@ public final class ChunkedTextLoader {
      * leave the existing document in place.
      */
     public static RSyntaxDocument buildDocument(
-            String text, String styleKey, BooleanSupplier cancelled) {
+            String text,
+            String styleKey,
+            DisplayTextSplitter.Split split,
+            BooleanSupplier cancelled) {
         String source = text == null ? "" : text;
         String style = styleKey == null ? ContentType.PLAIN_STYLE : styleKey;
-        RSyntaxDocument document =
-                new RSyntaxDocument(
-                        new ContinuedStringTokenMakerFactory(new PrettifyTokenMakerFactory()),
-                        style);
+        PrettifyTokenMakerFactory baseFactory = new PrettifyTokenMakerFactory();
+        // The ContinuedStringTokenMaker wrapper is needed only for styles whose document token maker
+        // parses strings directly. HTTP messages handle string continuation inside the body delegate
+        // instead, and the wrapper would corrupt the carried body state, so it is not applied there.
+        TokenMakerFactory factory =
+                PrettifyTokenMakerFactory.isHttpStyle(style)
+                        ? baseFactory
+                        : new ContinuedStringTokenMakerFactory(baseFactory);
+        PrettifyDocument document = new PrettifyDocument(factory, style, split);
         // Set the tab size on the document before it is displayed: RSyntaxDocument defaults it to 5,
         // and changing it after the document is installed forces a full re-layout of the (possibly
         // huge) document on the EDT.
@@ -56,6 +65,9 @@ public final class ChunkedTextLoader {
         if (cancelled != null && cancelled.getAsBoolean()) {
             return null;
         }
+        // Resolve the HTTP continuation-aware line states here, off the EDT, so painting never walks
+        // a large document.
+        document.precomputeLineStates();
         return document;
     }
 

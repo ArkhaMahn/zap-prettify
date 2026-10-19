@@ -24,6 +24,7 @@ public class ContinuedStringTokenMaker implements TokenMaker {
     private static final int MARKER = 0x40000000;
     private static final int MARKER_MASK = 0xC0000000;
     private static final int SINGLE_QUOTE = 0x10000;
+    private static final int LEADING_ESCAPE = 0x20000;
     private static final int LANGUAGE_SHIFT = 20;
     private static final int BASE_MASK = 0xFFFF;
 
@@ -44,23 +45,35 @@ public class ContinuedStringTokenMaker implements TokenMaker {
     @Override
     public int getLastTokenTypeOnLine(Segment segment, int initialTokenType) {
         if (isMarker(initialTokenType)) {
-            int quoteIndex = indexOfQuote(segment, markerQuote(initialTokenType));
+            int quoteIndex =
+                    indexOfQuote(
+                            segment, markerQuote(initialTokenType), leadingEscape(initialTokenType));
             if (quoteIndex < 0) {
-                return initialTokenType;
+                // No unescaped closing quote on this row, so the string is still open. RSTA's
+                // delegates do not honour a carried "inside string" state, so do not ask them to
+                // re-detect it: keep the marker, only refreshing whether this row leaves a dangling
+                // backslash that escapes the first character of the next row.
+                return marker(
+                        markerQuote(initialTokenType),
+                        languageOf(initialTokenType),
+                        0,
+                        endsWithOddBackslashes(segment));
             }
             Segment rest =
                     new Segment(
                             segment.array,
                             segment.offset + quoteIndex + 1,
                             segment.count - quoteIndex - 1);
-            return lastType(rest, baseOf(initialTokenType));
+            // After the closing quote the remainder is ordinary code again, so the delegate must
+            // start from a fresh state rather than the carried "inside string" state.
+            return lastType(rest, 0);
         }
         return lastType(segment, initialTokenType);
     }
 
     private Token continueString(Segment segment, int marker, int startOffset) {
         char quote = markerQuote(marker);
-        int quoteIndex = indexOfQuote(segment, quote);
+        int quoteIndex = indexOfQuote(segment, quote, leadingEscape(marker));
         int end = quoteIndex < 0 ? segment.count : quoteIndex + 1;
         int type = quote == '\'' ? TokenTypes.LITERAL_CHAR : TokenTypes.LITERAL_STRING_DOUBLE_QUOTE;
         TokenImpl token =
@@ -72,7 +85,11 @@ public class ContinuedStringTokenMaker implements TokenMaker {
                         type,
                         languageOf(marker));
         Segment rest = new Segment(segment.array, segment.offset + end, segment.count - end);
-        token.setNextToken(delegate.getTokenList(rest, baseOf(marker), startOffset + end));
+        // The remainder is ordinary code again, so the delegate starts from a fresh state; if that
+        // code opens a new string which the split leaves unterminated, recolour it too, otherwise its
+        // first (visible) row paints with the error colour even though its continuation rows are
+        // correct.
+        token.setNextToken(recolourOpenString(delegate.getTokenList(rest, 0, startOffset + end)));
         return token;
     }
 
@@ -82,7 +99,11 @@ public class ContinuedStringTokenMaker implements TokenMaker {
         if (open == null) {
             return lastType;
         }
-        return marker(quoteOfType(open.getType()), open.getLanguageIndex(), lastType);
+        return marker(
+                quoteOfType(open.getType()),
+                open.getLanguageIndex(),
+                lastType,
+                endsWithOddBackslashes(segment));
     }
 
     private static Token openString(Token token) {
@@ -109,8 +130,8 @@ public class ContinuedStringTokenMaker implements TokenMaker {
         return token;
     }
 
-    private static int indexOfQuote(Segment segment, char quote) {
-        int i = 0;
+    private static int indexOfQuote(Segment segment, char quote, boolean leadingEscape) {
+        int i = leadingEscape && segment.count > 0 ? 1 : 0;
         while (i < segment.count) {
             char c = segment.array[segment.offset + i];
             if (c == '\\') {
@@ -125,6 +146,27 @@ public class ContinuedStringTokenMaker implements TokenMaker {
         return -1;
     }
 
+    /**
+     * Whether {@code segment} ends with an odd run of backslashes. Such a run means the character
+     * after the wrap break (on the next display line) is escaped, so the continuation must not treat
+     * a leading quote as closing the open string and must not restart escape scanning one character
+     * early.
+     */
+    private static boolean endsWithOddBackslashes(Segment segment) {
+        int end = segment.offset + segment.count;
+        while (end > segment.offset
+                && (segment.array[end - 1] == '\n' || segment.array[end - 1] == '\r')) {
+            end--;
+        }
+        boolean odd = false;
+        int p = end;
+        while (p > segment.offset && segment.array[p - 1] == '\\') {
+            odd = !odd;
+            p--;
+        }
+        return odd;
+    }
+
     private static char quoteOfType(int type) {
         return type == TokenTypes.ERROR_CHAR ? '\'' : '"';
     }
@@ -137,17 +179,18 @@ public class ContinuedStringTokenMaker implements TokenMaker {
         return (initialTokenType & MARKER_MASK) == MARKER;
     }
 
+    private static boolean leadingEscape(int marker) {
+        return (marker & LEADING_ESCAPE) != 0;
+    }
+
     private static int languageOf(int marker) {
         return (marker >>> LANGUAGE_SHIFT) & 0xF;
     }
 
-    private static int baseOf(int marker) {
-        return (short) (marker & BASE_MASK);
-    }
-
-    private static int marker(char quote, int languageIndex, int base) {
+    private static int marker(char quote, int languageIndex, int base, boolean leadingEscape) {
         return MARKER
                 | (quote == '\'' ? SINGLE_QUOTE : 0)
+                | (leadingEscape ? LEADING_ESCAPE : 0)
                 | ((languageIndex & 0xF) << LANGUAGE_SHIFT)
                 | (base & BASE_MASK);
     }

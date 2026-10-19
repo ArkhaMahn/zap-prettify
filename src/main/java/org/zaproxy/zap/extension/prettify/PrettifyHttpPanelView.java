@@ -11,6 +11,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
+import javax.swing.ScrollPaneConstants;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
 import javax.swing.text.DefaultHighlighter;
@@ -97,6 +98,10 @@ public class PrettifyHttpPanelView
         this.mainPanel = new JPanel(new BorderLayout());
         this.textArea = new PrettifyTextArea(DisplayUtils.isDarkLookAndFeel());
         this.scrollPane = new RTextScrollPane(textArea, true);
+        // The text is pre-wrapped to fit the viewport, so a horizontal scrollbar could never reveal
+        // anything: its thumb would always span the full track. Disable it so the wrap appears
+        // contained instead of showing a redundant bar.
+        this.scrollPane.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
         this.mainPanel.add(scrollPane, BorderLayout.CENTER);
         this.textArea.addComponentListener(
                 new ComponentAdapter() {
@@ -131,7 +136,7 @@ public class PrettifyHttpPanelView
         Message message = model.getMessage();
         final String data = model.getData();
         final String contentType = contentTypeOf(message);
-        final boolean stripTrailingNewlines = shouldStripTrailingNewlines(message);
+        final boolean stripTrailing = shouldStripTrailingNewlines(message);
         final int widthPx = wrapMaxWidthPx();
         final long gen = ++generation;
         wrappedWidthPx = widthPx;
@@ -139,15 +144,30 @@ public class PrettifyHttpPanelView
         PrettifyExecutor.get()
                 .submit(
                         () -> {
-                            String raw = data;
-                            if (raw != null && stripTrailingNewlines) {
-                                // Header-only views (and All views of a bodyless message) drop the
-                                // blank line that terminates the header block. A display cleanup,
-                                // not reformatting.
-                                raw = stripTrailingNewlines(raw);
+                            String text = data;
+                            if (text != null) {
+                                text = format(text, contentType, stripTrailing);
                             }
-                            prepareAndInstall(raw, styleFor(contentType), widthPx, gen);
+                            prepareAndInstall(text, styleFor(contentType, text), widthPx, gen);
                         });
+    }
+
+    /**
+     * Burp-style pretty-printing, best-effort and never throwing: the All views reformat the body
+     * that follows the header block, the body-only views reformat the whole (body) text, and the
+     * header-only views just drop the blank line that terminates the header block.
+     */
+    private String format(String text, String contentType, boolean stripTrailing) {
+        switch (target) {
+            case REQUEST_ALL:
+            case RESPONSE_ALL:
+                return PrettyPrint.formatMessage(ContentType.styleKeyFor(contentType), text);
+            case REQUEST_BODY:
+            case RESPONSE_BODY:
+                return PrettyPrint.formatBody(ContentType.styleKeyFor(contentType, text), text);
+            default:
+                return stripTrailing ? stripTrailingNewlines(text) : text;
+        }
     }
 
     /**
@@ -161,7 +181,7 @@ public class PrettifyHttpPanelView
                 DisplayTextSplitter.split(text, widthPx, charWidths());
         final RSyntaxDocument document =
                 ChunkedTextLoader.buildDocument(
-                        newSplit.displayText(), style, () -> gen != generation);
+                        newSplit.displayText(), style, newSplit, () -> gen != generation);
         if (document == null) {
             return;
         }
@@ -308,11 +328,11 @@ public class PrettifyHttpPanelView
     }
 
     /** Syntax highlighting is always applied, based on the fixed style or the content type. */
-    private String styleFor(String contentType) {
+    private String styleFor(String contentType, String body) {
         if (fixedStyleKey != null) {
             return fixedStyleKey;
         }
-        return ContentType.styleKeyFor(contentType);
+        return ContentType.styleKeyFor(contentType, body);
     }
 
     private boolean isHeaderTarget() {
