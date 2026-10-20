@@ -3,6 +3,10 @@ package org.zaproxy.zap.extension.prettify;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import javax.swing.text.Segment;
+import org.fife.ui.rsyntaxtextarea.Token;
+import org.fife.ui.rsyntaxtextarea.TokenMaker;
+import org.fife.ui.rsyntaxtextarea.TokenTypes;
 
 /**
  * Inserts hard line breaks into overlong single lines so the text area never has to lay out an
@@ -64,6 +68,19 @@ public final class DisplayTextSplitter {
      */
     public static Split split(
             String string, String numberingSource, int maxWidth, CharWidths widths) {
+        return split(string, numberingSource, null, maxWidth, widths);
+    }
+
+    /**
+     * Splits {@code string} into display lines like {@link #split(String, String, int, CharWidths)},
+     * but aware of {@code style}'s tokens so the wrapped view is coloured like the unwrapped one.
+     * Breaks sit at the exact width (filling every row), and when a break falls inside a token the
+     * rows it spans are recorded with that token's original type, so {@link PrettifyDocument} paints
+     * the fragments correctly instead of showing whatever a per-line tokenizer would make of them.
+     * When {@code style} is null (or has no token maker) the usual tokenizer-based colouring applies.
+     */
+    public static Split split(
+            String string, String numberingSource, String style, int maxWidth, CharWidths widths) {
         if (maxWidth <= 0 || widths == null) {
             return split(string);
         }
@@ -71,8 +88,14 @@ public final class DisplayTextSplitter {
             String s = string == null ? "" : string;
             return new Split(s, s, new int[0], numberingSource);
         }
+        // Tokenizing is only needed when something actually wraps; typical messages never reach the
+        // width limit, so skip it entirely then.
+        TokenInfo info = needsWrap(string, maxWidth, widths) ? tokenInfo(string, style) : null;
         List<Integer> breakOffsets = new ArrayList<>();
         List<Integer> breakIndents = new ArrayList<>();
+        List<Integer> tokenStarts = new ArrayList<>();
+        List<Integer> tokenEnds = new ArrayList<>();
+        List<Integer> tokenTypes = new ArrayList<>();
         int n = string.length();
         StringBuilder display = new StringBuilder(n + n / 16 + 16);
         int lineStart = 0;
@@ -81,18 +104,43 @@ public final class DisplayTextSplitter {
             // content. Breaking on it here would let the document merge the rows back together.
             if (string.charAt(i) == '\n') {
                 appendLineByWidth(
-                        string, lineStart, i, maxWidth, widths, display, breakOffsets, breakIndents);
+                        string,
+                        lineStart,
+                        i,
+                        maxWidth,
+                        widths,
+                        info,
+                        display,
+                        breakOffsets,
+                        breakIndents,
+                        tokenStarts,
+                        tokenEnds,
+                        tokenTypes);
                 display.append('\n');
                 lineStart = i + 1;
             }
         }
         appendLineByWidth(
-                string, lineStart, n, maxWidth, widths, display, breakOffsets, breakIndents);
+                string,
+                lineStart,
+                n,
+                maxWidth,
+                widths,
+                info,
+                display,
+                breakOffsets,
+                breakIndents,
+                tokenStarts,
+                tokenEnds,
+                tokenTypes);
         return new Split(
                 display.toString(),
                 string,
                 toIntArray(breakOffsets),
                 toIntArray(breakIndents),
+                toIntArray(tokenStarts),
+                toIntArray(tokenEnds),
+                toIntArray(tokenTypes),
                 numberingSource);
     }
 
@@ -102,9 +150,13 @@ public final class DisplayTextSplitter {
             int end,
             int maxWidth,
             CharWidths widths,
+            TokenInfo info,
             StringBuilder display,
             List<Integer> breakOffsets,
-            List<Integer> breakIndents) {
+            List<Integer> breakIndents,
+            List<Integer> tokenStarts,
+            List<Integer> tokenEnds,
+            List<Integer> tokenTypes) {
         // Continuation rows are indented to the wrapped line's own indentation level so a wrapped
         // value does not snap back to column zero but stays under the block it belongs to.
         int indentLength = leadingIndentLength(string, start, end);
@@ -120,22 +172,211 @@ public final class DisplayTextSplitter {
             double cw = widths.widthOf(cp);
             // Always keep at least one code point per row, even if it alone is wider than maxWidth.
             if (i > segmentStart && width + cw > maxWidth) {
-                display.append(string, segmentStart, i);
+                // Fill the row to the width limit and cut here. Cutting in the middle of a token is
+                // safe because recordRowTokens() records the closed-over token's original type for
+                // each fragment, so a split token still paints with its own colour. Snapping the
+                // break back to a token boundary instead would leave the row short (a header name
+                // stranded before its value, or trailing empty space before the wrap).
+                int breakAt = i;
+                int contentDisplayStart = display.length();
+                display.append(string, segmentStart, breakAt);
+                recordRowTokens(
+                        info,
+                        segmentStart,
+                        breakAt,
+                        contentDisplayStart,
+                        tokenStarts,
+                        tokenEnds,
+                        tokenTypes);
                 breakOffsets.add(display.length());
                 display.append('\n');
                 if (indentLength > 0) {
+                    int indentDisplayStart = display.length();
                     display.append(string, start, start + indentLength);
+                    if (info != null) {
+                        tokenStarts.add(indentDisplayStart);
+                        tokenEnds.add(indentDisplayStart + indentLength);
+                        tokenTypes.add(TokenTypes.WHITESPACE);
+                    }
                 }
                 breakIndents.add(indentLength);
-                segmentStart = i;
+                segmentStart = breakAt;
                 width = indentWidth;
+                i = breakAt;
+                continue;
             }
             width += cw;
             i += Character.charCount(cp);
         }
         if (segmentStart < end) {
+            int contentDisplayStart = display.length();
             display.append(string, segmentStart, end);
+            recordRowTokens(
+                    info,
+                    segmentStart,
+                    end,
+                    contentDisplayStart,
+                    tokenStarts,
+                    tokenEnds,
+                    tokenTypes);
         }
+    }
+
+    /**
+     * Records, for one display row, the original token type of each character it contains, as
+     * display-offset ranges. {@link PrettifyDocument} replays these spans as the row's tokens, so the
+     * wrapped view is coloured exactly like the unwrapped one - a token a wrap break cut in half (a
+     * long regular expression, for example) keeps its colour instead of showing whatever fragments
+     * the per-line tokenizer would produce.
+     */
+    private static void recordRowTokens(
+            TokenInfo info,
+            int rowStart,
+            int rowEnd,
+            int contentDisplayStart,
+            List<Integer> tokenStarts,
+            List<Integer> tokenEnds,
+            List<Integer> tokenTypes) {
+        if (info == null || info.tokenType == null || rowStart >= rowEnd) {
+            return;
+        }
+        int n = info.tokenType.length;
+        int pos = rowStart;
+        while (pos < rowEnd) {
+            int type = pos < n ? (info.tokenType[pos] & 0xFF) : 0;
+            int tokenEnd = pos < n && info.tokenEnd[pos] > pos ? info.tokenEnd[pos] : pos + 1;
+            int fragmentEnd = Math.min(tokenEnd, rowEnd);
+            if (fragmentEnd <= pos) {
+                fragmentEnd = pos + 1;
+            }
+            // Whitespace/unknown runs are painted like whitespace, never like an error fragment.
+            if (type == 0) {
+                type = TokenTypes.WHITESPACE;
+            }
+            tokenStarts.add(contentDisplayStart + (pos - rowStart));
+            tokenEnds.add(contentDisplayStart + (fragmentEnd - rowStart));
+            tokenTypes.add(type);
+            pos = fragmentEnd;
+        }
+    }
+
+    /** Whether any logical line is wider than {@code maxWidth} and therefore needs wrapping. */
+    private static boolean needsWrap(String string, int maxWidth, CharWidths widths) {
+        int n = string.length();
+        int lineStart = 0;
+        for (int i = 0; i <= n; i++) {
+            if (i == n || string.charAt(i) == '\n') {
+                double w = 0;
+                int k = lineStart;
+                while (k < i) {
+                    int cp = string.codePointAt(k);
+                    w += widths.widthOf(cp);
+                    if (w > maxWidth) {
+                        return true;
+                    }
+                    k += Character.charCount(cp);
+                }
+                lineStart = i + 1;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Tokenizes {@code text} with the same token maker the view uses for {@code style} (including
+     * the HTTP message token maker, whose body delegate is chosen from the {@code Content-Type}
+     * header) and records, for every character, which token covers it and where that token ends.
+     * This yields both the token boundaries a wrap break may safely land on and the original token
+     * types a cut token must keep. Returns null when no token maker is available or tokenization
+     * fails, in which case breaks sit at the exact width.
+     */
+    private static TokenInfo tokenInfo(String text, String style) {
+        if (style == null) {
+            return null;
+        }
+        TokenMaker tokenMaker;
+        try {
+            tokenMaker = new PrettifyTokenMakerFactory().getTokenMaker(style);
+        } catch (RuntimeException e) {
+            return null;
+        }
+        if (tokenMaker == null) {
+            return null;
+        }
+        boolean http = PrettifyTokenMakerFactory.isHttpStyle(style);
+        // Match the token maker the view's document uses for this style: HTTP messages handle string
+        // continuation inside the body delegate, every other style wraps its maker in
+        // ContinuedStringTokenMaker so a string that spans display rows keeps the string colour.
+        if (!http) {
+            tokenMaker = new ContinuedStringTokenMaker(tokenMaker);
+        }
+        int n = text.length();
+        TokenInfo info = new TokenInfo();
+        info.tokenType = new byte[n];
+        info.tokenEnd = new int[n];
+        int state = 0;
+        int pos = 0;
+        try {
+            while (pos <= n) {
+                int nl = text.indexOf('\n', pos);
+                int end = nl < 0 ? n : nl;
+                int len = end - pos;
+                char[] chars = new char[len];
+                if (len > 0) {
+                    text.getChars(pos, end, chars, 0);
+                }
+                Segment segment = new Segment(chars, 0, len);
+                Token nullToken = null;
+                int lastType = state;
+                for (Token t = tokenMaker.getTokenList(segment, state, pos);
+                        t != null;
+                        t = t.getNextToken()) {
+                    int type = t.getType();
+                    if (type == TokenTypes.NULL) {
+                        nullToken = t;
+                        continue;
+                    }
+                    lastType = type;
+                    int length = t.length();
+                    if (length <= 0) {
+                        continue;
+                    }
+                    int offset = t.getOffset();
+                    if (offset < 0 || offset > n) {
+                        continue;
+                    }
+                    int to = Math.min(n, offset + length);
+                    for (int k = offset; k < to; k++) {
+                        info.tokenType[k] = (byte) type;
+                        info.tokenEnd[k] = to;
+                    }
+                }
+                // The HTTP token maker encodes its carried state in the trailing null token; every
+                // other style carries the state the maker reports for the line (as RSTA does), which
+                // lets a multi-line string keep its state (and colour) across rows.
+                state =
+                        http
+                                ? HttpTokenMaker.resetAfterLine(
+                                        nullToken != null ? nullToken.getType() : lastType)
+                                : tokenMaker.getLastTokenTypeOnLine(segment, state);
+                if (nl < 0) {
+                    break;
+                }
+                pos = end + 1;
+            }
+        } catch (RuntimeException e) {
+            return null;
+        }
+        return info;
+    }
+
+    /** Per-character original token information used to recolour wrap breaks. */
+    private static final class TokenInfo {
+        /** For each offset, the type of the token covering it, or 0 outside any paintable token. */
+        byte[] tokenType;
+
+        /** For each offset, the exclusive end of the token covering it. */
+        int[] tokenEnd;
     }
 
     /** Length of the leading run of spaces/tabs on the line {@code [start, end)}. */
@@ -471,6 +712,9 @@ public final class DisplayTextSplitter {
         private final String originalText;
         private final int[] breakOffsets;
         private final int[] breakIndents;
+        private final int[] tokenStarts;
+        private final int[] tokenEnds;
+        private final int[] tokenTypes;
         private final int[] displayLineNumbers;
         private final int originalLineCount;
 
@@ -488,10 +732,33 @@ public final class DisplayTextSplitter {
                 int[] breakOffsets,
                 int[] breakIndents,
                 String numberingSource) {
+            this(
+                    displayText,
+                    originalText,
+                    breakOffsets,
+                    breakIndents,
+                    new int[0],
+                    new int[0],
+                    new int[0],
+                    numberingSource);
+        }
+
+        Split(
+                String displayText,
+                String originalText,
+                int[] breakOffsets,
+                int[] breakIndents,
+                int[] tokenStarts,
+                int[] tokenEnds,
+                int[] tokenTypes,
+                String numberingSource) {
             this.displayText = displayText;
             this.originalText = originalText;
             this.breakOffsets = breakOffsets;
             this.breakIndents = breakIndents;
+            this.tokenStarts = tokenStarts;
+            this.tokenEnds = tokenEnds;
+            this.tokenTypes = tokenTypes;
             this.displayLineNumbers =
                     computeDisplayLineNumbers(displayText, originalText, breakOffsets, numberingSource);
             this.originalLineCount = countOriginalLines(displayLineNumbers);
@@ -523,6 +790,25 @@ public final class DisplayTextSplitter {
          */
         public int[] breakIndents() {
             return breakIndents;
+        }
+
+        /**
+         * Display-offset ranges (parallel to {@link #tokenEnds()}/{@link #tokenTypes()}) of the
+         * tokens each display row is made of, taken from the unwrapped original text. {@link
+         * PrettifyDocument} replays them so the wrapped rows are coloured exactly like the unwrapped
+         * view, without tokenizing the display text a second time. Empty when no token maker was
+         * available, in which case the document tokenizes the rows as usual.
+         */
+        public int[] tokenStarts() {
+            return tokenStarts;
+        }
+
+        public int[] tokenEnds() {
+            return tokenEnds;
+        }
+
+        public int[] tokenTypes() {
+            return tokenTypes;
         }
 
         /**

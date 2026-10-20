@@ -189,7 +189,7 @@ public class PrettifyHttpPanelView
             final int widthPx,
             final long gen) {
         final DisplayTextSplitter.Split newSplit =
-                DisplayTextSplitter.split(text, numberingSource, widthPx, charWidths());
+                DisplayTextSplitter.split(text, numberingSource, style, widthPx, charWidths());
         final RSyntaxDocument document =
                 ChunkedTextLoader.buildDocument(
                         newSplit.displayText(), style, newSplit, () -> gen != generation);
