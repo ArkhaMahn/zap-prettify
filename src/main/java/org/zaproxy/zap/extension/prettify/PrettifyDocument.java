@@ -36,6 +36,7 @@ public class PrettifyDocument extends RSyntaxDocument {
     private final boolean http;
     private final int[] continuationStarts;
     private final TokenMaker stateTokenMaker;
+    private final TokenMaker fallbackTokenMaker;
     private final Segment segment = new Segment();
 
     private int[] lineState;
@@ -56,6 +57,9 @@ public class PrettifyDocument extends RSyntaxDocument {
 
         this.http = PrettifyTokenMakerFactory.isHttpStyle(styleKey);
         this.stateTokenMaker = http ? tokenMakerFactory.getTokenMaker(styleKey) : null;
+        // Lines the splitter left spanless are tokenized lazily with this maker, starting at state
+        // zero (the splitter only skips lines that cannot carry state).
+        this.fallbackTokenMaker = tokenMakerFactory.getTokenMaker(styleKey);
         this.continuationStarts = continuationStarts(split);
         this.lineState = new int[Math.max(16, lineCount())];
     }
@@ -74,10 +78,13 @@ public class PrettifyDocument extends RSyntaxDocument {
 
     @Override
     public Token getTokenListForLine(int line) {
-        if (tokenStarts.length != 0) {
+        if (tokenStarts.length != 0 && lineHasSpans(line)) {
             return replayTokenList(line);
         }
         if (!http) {
+            if (tokenStarts.length != 0) {
+                return fallbackTokenList(line);
+            }
             return super.getTokenListForLine(line);
         }
         if (line == cachedTokenLine && cachedTokenList != null) {
@@ -108,10 +115,13 @@ public class PrettifyDocument extends RSyntaxDocument {
 
     @Override
     public int getLastTokenTypeOnLine(int line) {
-        if (tokenStarts.length != 0) {
+        if (tokenStarts.length != 0 && lineHasSpans(line)) {
             return replayLastTokenType(line);
         }
         if (!http) {
+            if (tokenStarts.length != 0) {
+                return fallbackLastType(line);
+            }
             return super.getLastTokenTypeOnLine(line);
         }
         if (line < 0) {
@@ -133,6 +143,39 @@ public class PrettifyDocument extends RSyntaxDocument {
     }
 
     // -- Replayed spans -----------------------------------------------------------------------
+
+    /** Whether the display line has recorded spans, and so can be replayed instead of tokenized. */
+    private boolean lineHasSpans(int line) {
+        Element root = getDefaultRootElement();
+        if (line < 0 || line >= root.getElementCount()) {
+            return false;
+        }
+        Element lineElement = root.getElement(line);
+        int start = lineElement.getStartOffset();
+        int end = Math.max(start, lineElement.getEndOffset() - 1);
+        if (end <= start) {
+            return false;
+        }
+        int i = firstSpanAtOrAfter(start);
+        return i < tokenStarts.length && tokenStarts[i] < end;
+    }
+
+    /** First span whose start is at or after {@code offset}. */
+    private int firstSpanAtOrAfter(int offset) {
+        int lo = 0;
+        int hi = tokenStarts.length - 1;
+        int answer = tokenStarts.length;
+        while (lo <= hi) {
+            int mid = (lo + hi) >>> 1;
+            if (tokenStarts[mid] >= offset) {
+                answer = mid;
+                hi = mid - 1;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        return answer;
+    }
 
     private Token replayTokenList(int line) {
         if (line == cachedTokenLine && cachedTokenList != null) {
@@ -193,6 +236,48 @@ public class PrettifyDocument extends RSyntaxDocument {
             return candidate;
         }
         return -1;
+    }
+
+    /**
+     * Tokenizes a line the splitter left spanless, starting from state zero. Such a line cannot
+     * carry state in or out, so it is independent of the replayed rows around it.
+     */
+    private Token fallbackTokenList(int line) {
+        Element root = getDefaultRootElement();
+        if (line < 0 || line >= root.getElementCount() || fallbackTokenMaker == null) {
+            return super.getTokenListForLine(line);
+        }
+        Element lineElement = root.getElement(line);
+        int start = lineElement.getStartOffset();
+        int length = lineElement.getEndOffset() - 1 - start;
+        if (length < 0) {
+            length = 0;
+        }
+        try {
+            getText(start, length, segment);
+        } catch (BadLocationException e) {
+            return super.getTokenListForLine(line);
+        }
+        return fallbackTokenMaker.getTokenList(segment, 0, start);
+    }
+
+    private int fallbackLastType(int line) {
+        Element root = getDefaultRootElement();
+        if (line < 0 || line >= root.getElementCount() || fallbackTokenMaker == null) {
+            return 0;
+        }
+        Element lineElement = root.getElement(line);
+        int start = lineElement.getStartOffset();
+        int length = lineElement.getEndOffset() - 1 - start;
+        if (length < 0) {
+            return 0;
+        }
+        try {
+            getText(start, length, segment);
+        } catch (BadLocationException e) {
+            return 0;
+        }
+        return fallbackTokenMaker.getLastTokenTypeOnLine(segment, 0);
     }
 
     // -- HTTP carried state (no replayed spans) -----------------------------------------------

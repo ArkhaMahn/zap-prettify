@@ -90,7 +90,10 @@ public final class DisplayTextSplitter {
         }
         // Tokenizing is only needed when something actually wraps; typical messages never reach the
         // width limit, so skip it entirely then.
-        TokenInfo info = needsWrap(string, maxWidth, widths) ? tokenInfo(string, style) : null;
+        TokenInfo info =
+                needsWrap(string, maxWidth, widths)
+                        ? tokenInfo(string, style, maxWidth, widths)
+                        : null;
         List<Integer> breakOffsets = new ArrayList<>();
         List<Integer> breakIndents = new ArrayList<>();
         List<Integer> tokenStarts = new ArrayList<>();
@@ -241,6 +244,18 @@ public final class DisplayTextSplitter {
             return;
         }
         int n = info.tokenType.length;
+        // A row whose line was not tokenized has no recorded types; leave it spanless so the
+        // document tokenizes it lazily.
+        boolean any = false;
+        for (int k = rowStart; k < rowEnd; k++) {
+            if (k < n && info.tokenType[k] != 0) {
+                any = true;
+                break;
+            }
+        }
+        if (!any) {
+            return;
+        }
         int pos = rowStart;
         while (pos < rowEnd) {
             int type = pos < n ? (info.tokenType[pos] & 0xFF) : 0;
@@ -258,6 +273,45 @@ public final class DisplayTextSplitter {
             tokenTypes.add(type);
             pos = fragmentEnd;
         }
+    }
+
+    /** Whether the line {@code [start, end)} is wider than {@code maxWidth}. */
+    private static boolean lineWraps(
+            String string, int start, int end, int maxWidth, CharWidths widths) {
+        double w = 0;
+        int i = start;
+        while (i < end) {
+            int cp = string.codePointAt(i);
+            w += widths.widthOf(cp);
+            if (w > maxWidth) {
+                return true;
+            }
+            i += Character.charCount(cp);
+        }
+        return false;
+    }
+
+    /**
+     * Conservative check for text that could leave the tokenizer in a carried state (a comment,
+     * string, HTML/JS/CSS opener, or a line continuation). Skipped lines are assumed to end in the
+     * state they started in - zero - so anything that might not is tokenized instead.
+     */
+    private static boolean mayCarryState(String string, int start, int end) {
+        for (int i = start; i < end; i++) {
+            switch (string.charAt(i)) {
+                case '"':
+                case '\'':
+                case '`':
+                case '\\':
+                case '/':
+                case '*':
+                case '<':
+                    return true;
+                default:
+                    break;
+            }
+        }
+        return false;
     }
 
     /** Whether any logical line is wider than {@code maxWidth} and therefore needs wrapping. */
@@ -283,14 +337,19 @@ public final class DisplayTextSplitter {
     }
 
     /**
-     * Tokenizes {@code text} with the same token maker the view uses for {@code style} (including
-     * the HTTP message token maker, whose body delegate is chosen from the {@code Content-Type}
-     * header) and records, for every character, which token covers it and where that token ends.
-     * This yields both the token boundaries a wrap break may safely land on and the original token
-     * types a cut token must keep. Returns null when no token maker is available or tokenization
-     * fails, in which case breaks sit at the exact width.
+     * Tokenizes the lines of {@code text} with the same token maker the view uses for {@code style}
+     * (including the HTTP message token maker, whose body delegate is chosen from the {@code
+     * Content-Type} header) and records, for every character of a tokenized line, which token covers
+     * it and where that token ends. This yields the token types a cut token must keep.
+     *
+     * <p>Only lines that need it are tokenized: a line is tokenized when it wraps, when it starts
+     * inside a carried construct (state != 0), or when it could open one. Lines that cannot change
+     * the carried state are skipped and left with no recorded tokens, so {@link PrettifyDocument}
+     * tokenizes them lazily instead of paying for them up front. Returns null when no token maker is
+     * available or tokenization fails, in which case breaks sit at the exact width.
      */
-    private static TokenInfo tokenInfo(String text, String style) {
+    private static TokenInfo tokenInfo(
+            String text, String style, int maxWidth, CharWidths widths) {
         if (style == null) {
             return null;
         }
@@ -320,45 +379,57 @@ public final class DisplayTextSplitter {
             while (pos <= n) {
                 int nl = text.indexOf('\n', pos);
                 int end = nl < 0 ? n : nl;
-                int len = end - pos;
-                char[] chars = new char[len];
-                if (len > 0) {
-                    text.getChars(pos, end, chars, 0);
-                }
-                Segment segment = new Segment(chars, 0, len);
-                Token nullToken = null;
-                int lastType = state;
-                for (Token t = tokenMaker.getTokenList(segment, state, pos);
-                        t != null;
-                        t = t.getNextToken()) {
-                    int type = t.getType();
-                    if (type == TokenTypes.NULL) {
-                        nullToken = t;
-                        continue;
-                    }
-                    lastType = type;
-                    int length = t.length();
-                    if (length <= 0) {
-                        continue;
-                    }
-                    int offset = t.getOffset();
-                    if (offset < 0 || offset > n) {
-                        continue;
-                    }
-                    int to = Math.min(n, offset + length);
-                    for (int k = offset; k < to; k++) {
-                        info.tokenType[k] = (byte) type;
-                        info.tokenEnd[k] = to;
-                    }
-                }
-                // The HTTP token maker encodes its carried state in the trailing null token; every
-                // other style carries the state the maker reports for the line (as RSTA does), which
-                // lets a multi-line string keep its state (and colour) across rows.
-                state =
+                // A line that cannot affect the carried state is left untokenized: it never wraps,
+                // so it stays a single display row with no spans, and the document tokenizes it
+                // lazily when (and only if) it is painted.
+                boolean tokenize =
                         http
-                                ? HttpTokenMaker.resetAfterLine(
-                                        nullToken != null ? nullToken.getType() : lastType)
-                                : tokenMaker.getLastTokenTypeOnLine(segment, state);
+                                || state != 0
+                                || lineWraps(text, pos, end, maxWidth, widths)
+                                || mayCarryState(text, pos, end);
+                if (tokenize) {
+                    int len = end - pos;
+                    char[] chars = new char[len];
+                    if (len > 0) {
+                        text.getChars(pos, end, chars, 0);
+                    }
+                    Segment segment = new Segment(chars, 0, len);
+                    Token nullToken = null;
+                    int lastType = state;
+                    for (Token t = tokenMaker.getTokenList(segment, state, pos);
+                            t != null;
+                            t = t.getNextToken()) {
+                        int type = t.getType();
+                        if (type == TokenTypes.NULL) {
+                            nullToken = t;
+                            continue;
+                        }
+                        lastType = type;
+                        int length = t.length();
+                        if (length <= 0) {
+                            continue;
+                        }
+                        int offset = t.getOffset();
+                        if (offset < 0 || offset > n) {
+                            continue;
+                        }
+                        int to = Math.min(n, offset + length);
+                        for (int k = offset; k < to; k++) {
+                            info.tokenType[k] = (byte) type;
+                            info.tokenEnd[k] = to;
+                        }
+                    }
+                    // The HTTP token maker encodes its carried state in the trailing null token;
+                    // every other style carries the state the maker reports for the line (as RSTA
+                    // does), which lets a multi-line string keep its state across rows.
+                    state =
+                            http
+                                    ? HttpTokenMaker.resetAfterLine(
+                                            nullToken != null ? nullToken.getType() : lastType)
+                                    : tokenMaker.getLastTokenTypeOnLine(segment, state);
+                } else {
+                    state = 0;
+                }
                 if (nl < 0) {
                     break;
                 }
