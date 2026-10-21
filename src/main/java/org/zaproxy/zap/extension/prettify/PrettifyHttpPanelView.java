@@ -254,30 +254,13 @@ public class PrettifyHttpPanelView
         switch (target) {
             case REQUEST_ALL:
             case RESPONSE_ALL:
-                return PrettyPrint.formatMessageFor(contentType, text, reformatBody(contentType, text));
+                return PrettyPrint.formatMessageFor(contentType, text);
             case REQUEST_BODY:
             case RESPONSE_BODY:
-                return reformatBody(contentType, text)
-                        ? PrettyPrint.formatBody(ContentType.styleKeyFor(contentType, text), text)
-                        : text;
+                return PrettyPrint.formatBody(ContentType.styleKeyFor(contentType, text), text);
             default:
                 return stripTrailing ? stripTrailingNewlines(text) : text;
         }
-    }
-
-    /**
-     * Whether the body may be re-formatted. A form body is not: the formatted form puts every
-     * parameter on its own line and drops the separators, which would change the body that is sent.
-     */
-    private boolean reformatBody(String contentType, String text) {
-        if (!editable) {
-            return true;
-        }
-        String body = bodyOf(text);
-        if (body == null) {
-            return true;
-        }
-        return !ContentType.FORM_STYLE.equals(ContentType.styleKeyFor(contentType, body));
     }
 
     /**

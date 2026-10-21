@@ -46,8 +46,6 @@ public final class PrettyPrint {
                     return braces(body, true, styleKey);
                 case ContentType.GRAPHQL_STYLE:
                     return graphql(body);
-                case ContentType.FORM_STYLE:
-                    return form(body);
                 default:
                     return body;
             }
@@ -1194,26 +1192,6 @@ public final class PrettyPrint {
     // ---------------------------------------------------------------------
 
     /** Puts each form parameter on its own line. Multipart bodies are left untouched. */
-    private static String form(String s) {
-        if (s == null || s.isEmpty() || s.trim().startsWith("--")) {
-            return s;
-        }
-        StringBuilder out = new StringBuilder(s.length() + 16);
-        int start = 0;
-        int n = s.length();
-        for (int i = 0; i <= n; i++) {
-            if (i == n || s.charAt(i) == '&') {
-                if (i > start) {
-                    if (out.length() > 0) {
-                        out.append('\n');
-                    }
-                    out.append(s, start, i);
-                }
-                start = i + 1;
-            }
-        }
-        return out.length() == 0 ? s : out.toString();
-    }
 
     // ---------------------------------------------------------------------
     // Shared helpers
