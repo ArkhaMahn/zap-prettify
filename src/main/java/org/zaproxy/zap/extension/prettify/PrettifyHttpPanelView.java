@@ -117,8 +117,14 @@ public class PrettifyHttpPanelView
     /** Whether the user changed the displayed text since it was loaded or last saved. */
     private boolean changed;
 
-    /** Caret offset to restore once the view has been re-rendered after a save. */
-    private int pendingCaretOffset = -1;
+    /**
+     * Where the caret is, counted in the characters that are not whitespace. The count survives the
+     * re-formatting of the text, which moves the caret but not the characters around it.
+     */
+    private int pendingCaretCount = -1;
+
+    /** Re-formats the text shortly after the user typed, the way Burp does. */
+    private Timer reformatTimer;
 
     /**
      * Start offsets of the rows the gutter numbers (the rows that are a line of the message).
@@ -336,12 +342,14 @@ public class PrettifyHttpPanelView
                     public void insertUpdate(DocumentEvent e) {
                         changed = true;
                         textEdited(e.getOffset(), 0, e.getLength());
+                        scheduleReformat();
                     }
 
                     @Override
                     public void removeUpdate(DocumentEvent e) {
                         changed = true;
                         textEdited(e.getOffset(), e.getLength(), 0);
+                        scheduleReformat();
                     }
 
                     @Override
@@ -353,14 +361,15 @@ public class PrettifyHttpPanelView
 
     /** Puts the caret back where the user left it after the view was re-rendered. */
     private void restoreCaret() {
-        if (pendingCaretOffset < 0) {
+        if (pendingCaretCount < 0) {
             return;
         }
-        int offset = pendingCaretOffset;
-        pendingCaretOffset = -1;
+        int count = pendingCaretCount;
+        pendingCaretCount = -1;
         try {
-            int length = textArea.getDocument().getLength();
-            textArea.setCaretPosition(Math.min(offset, length));
+            String text = textArea.getText();
+            int offset = offsetAfterNonWhitespace(text, count);
+            textArea.setCaretPosition(Math.min(offset, text.length()));
         } catch (Exception ignored) {
             // The document shrank; leave the caret where it is.
         }
@@ -556,6 +565,62 @@ public class PrettifyHttpPanelView
             }
         }
         gutterRowsText = displayText;
+    }
+
+    /**
+     * Schedules the re-formatting of the text. Burp re-formats the message while it is typed in an
+     * editable message; the re-formatting waits for a short pause, so that it does not happen in
+     * the middle of a word.
+     */
+    private void scheduleReformat() {
+        if (!editable) {
+            return;
+        }
+        if (reformatTimer == null) {
+            reformatTimer =
+                    new Timer(
+                            400,
+                            e -> {
+                                try {
+                                    reformat();
+                                } catch (RuntimeException ex) {
+                                    LOGGER.warn("Could not re-format the message.", ex);
+                                }
+                            });
+            reformatTimer.setRepeats(false);
+        }
+        reformatTimer.restart();
+    }
+
+    /**
+     * Re-formats the text the user typed. The message keeps the text it was received with, with the
+     * change applied to it, and the view is rendered again from it, which shows the re-formatted
+     * text.
+     */
+    private void reformat() {
+        DisplayTextSplitter.Split activeSplit = split;
+        if (activeSplit == null) {
+            return;
+        }
+        String edited = textArea.getText();
+        String raw = rawText();
+        String formatted = projection(raw);
+        String editedFormatted = activeSplit.toMessageText(edited);
+        if (editedFormatted.equals(formatted)) {
+            return;
+        }
+        String newRaw = applyEditToRaw(raw, formatted, editedFormatted);
+        if (newRaw.equals(raw)) {
+            return;
+        }
+        pendingCaretCount = countNonWhitespace(edited, 0, textArea.getCaretPosition());
+        try {
+            model.setData(newRaw);
+        } catch (RuntimeException e) {
+            LOGGER.warn("Could not re-format the message.", e);
+            return;
+        }
+        update();
     }
 
     /**
@@ -946,18 +1011,143 @@ public class PrettifyHttpPanelView
         setContentTypeIfMissing();
         // The message now holds the text the user typed, so the view is rendered again from it;
         // that also rebuilds the wrap breaks, so a further edit is unwrapped correctly.
-        pendingCaretOffset = textArea.getCaretPosition();
+        pendingCaretCount =
+                countNonWhitespace(textArea.getText(), 0, textArea.getCaretPosition());
         update();
     }
 
-    /** The edited text with the wrap breaks the split inserted taken out again. */
+    /**
+     * The message text to save: the message as it is, with the change the user made in the
+     * formatted view applied to it. The message keeps the whitespace it was received with, the
+     * formatted view is only a view of it.
+     */
     private String messageText() {
         String edited = textArea.getText();
         DisplayTextSplitter.Split activeSplit = split;
         if (activeSplit == null) {
             return edited;
         }
-        return activeSplit.toMessageText(edited);
+        String raw = rawText();
+        return applyEditToRaw(raw, projection(raw), activeSplit.toMessageText(edited));
+    }
+
+    /**
+     * The formatted text the Pretty view shows for the given message text. It is worked out again
+     * when the message is saved, because the view may not have been rendered since the last change.
+     */
+    private String projection(String raw) {
+        Message message = model.getMessage();
+        return format(raw, contentTypeOf(message), shouldStripTrailingNewlines(message));
+    }
+
+    /** The message as it is, without the formatting the Pretty view shows. */
+    private String rawText() {
+        return model.getData();
+    }
+
+    /**
+     * Applies the change the user made in the formatted text to the message text. The two texts
+     * hold the same characters apart from the whitespace the formatter changed, so the changed
+     * range is found by counting the characters that are not whitespace.
+     */
+    static String applyEditToRaw(String raw, String formatted, String edited) {
+        if (raw == null || edited == null || formatted == null) {
+            return edited;
+        }
+        if (formatted.equals(edited)) {
+            return raw;
+        }
+        int prefix = 0;
+        int limit = Math.min(formatted.length(), edited.length());
+        while (prefix < limit && formatted.charAt(prefix) == edited.charAt(prefix)) {
+            prefix++;
+        }
+        int suffix = 0;
+        while (suffix < limit - prefix
+                && formatted.charAt(formatted.length() - 1 - suffix)
+                        == edited.charAt(edited.length() - 1 - suffix)) {
+            suffix++;
+        }
+        int total = countNonWhitespace(formatted, 0, formatted.length());
+        int inSuffix = countNonWhitespace(formatted, formatted.length() - suffix, formatted.length());
+        if (countNonWhitespace(raw, 0, raw.length()) != total) {
+            // The formatter changed more than the whitespace: the change cannot be placed.
+            return edited;
+        }
+        int before = countNonWhitespace(formatted, 0, prefix);
+        int after = total - inSuffix;
+        int rawStart = offsetOfNonWhitespace(raw, before + 1);
+        int rawEnd = offsetOfNonWhitespace(raw, after + 1);
+        if (rawStart < 0 || rawEnd < rawStart || rawEnd > raw.length()) {
+            return edited;
+        }
+        int editedEnd = edited.length() - suffix;
+        if (rawStart == rawEnd) {
+            // Nothing was there: the whitespace that follows the inserted text belongs with it, or
+            // the line the text was inserted in would be joined with the next one.
+            editedEnd += leadingWhitespace(edited, editedEnd);
+        }
+        return raw.substring(0, rawStart)
+                + edited.substring(prefix, editedEnd)
+                + raw.substring(rawEnd);
+    }
+
+    /** The offset of the {@code count}th character that is not whitespace, or the text length. */
+    private static int offsetOfNonWhitespace(String text, int count) {
+        if (count <= 0) {
+            return 0;
+        }
+        int seen = 0;
+        for (int i = 0; i < text.length(); i++) {
+            if (!Character.isWhitespace(text.charAt(i))) {
+                seen++;
+                if (seen == count) {
+                    return i;
+                }
+            }
+        }
+        return text.length();
+    }
+
+    /** The number of whitespace characters at the given offset. */
+    private static int leadingWhitespace(String text, int offset) {
+        int count = 0;
+        while (offset + count < text.length() && Character.isWhitespace(text.charAt(offset + count))) {
+            count++;
+        }
+        return count;
+    }
+
+    /** The number of characters that are not whitespace in {@code text[from, to)}. */
+    private static int countNonWhitespace(String text, int from, int to) {
+        int count = 0;
+        int end = Math.min(to, text.length());
+        for (int i = Math.max(0, from); i < end; i++) {
+            if (!Character.isWhitespace(text.charAt(i))) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * The offset in {@code text} just after the {@code count}th character that is not whitespace, or
+     * the length of the text when it holds fewer.
+     */
+    private static int offsetAfterNonWhitespace(String text, int count) {
+        if (count <= 0) {
+            return 0;
+        }
+        int seen = 0;
+        for (int i = 0; i < text.length(); i++) {
+            if (!Character.isWhitespace(text.charAt(i))) {
+                seen++;
+                if (seen == count) {
+                    return i + 1;
+                }
+            }
+        }
+        return text.length();
     }
 
     @Override

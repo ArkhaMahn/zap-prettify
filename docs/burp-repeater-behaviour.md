@@ -79,14 +79,23 @@ ZAP has no separate "Repeater": the Requester, the manual request editor and Bre
 | the gutter numbers the original lines | the same here: only the rows that start a real message line are numbered |
 | JSON, XML, HTML, CSS and JavaScript are prettified | the same list; form bodies are left alone |
 
+### How this is implemented here
+
+- The message keeps the text it was received with. The Pretty view is a projection of it: the
+  formatted text, wrapped for the viewport.
+- An edit in the Pretty view is mapped back onto the message before it is saved. The mapping uses
+  the characters that are not whitespace: the formatter only changes whitespace, so the position of
+  the change in the message can be found by counting them. The message therefore keeps its own
+  whitespace and only the change the user made is different.
+- The text is re-formatted shortly after it was typed, the way Burp does it in an editable message.
+  The message is written with the change, and the view is rendered again from it.
+- The wrap is only a display feature: the breaks the view inserts are removed again before the
+  message is written.
+- The gutter numbers the rows that start a real message line; the wrapped rows and the rows the
+  formatter added are left blank.
+
 ### Differences that cannot be avoided in ZAP
 
-- **The wire content.** In Burp the message is the raw bytes; the Pretty tab is a projection of it
-  and an edit in the Pretty tab is mapped back onto the raw message. In ZAP the panel saves the view
-  that is currently selected, so the Pretty view writes what it shows into the message. The Pretty
-  view is therefore "what you see is what is sent".
-- **Live prettification.** Burp re-formats the message while it is typed. ZAP's editor does not do
-  that: the text is left alone while it is typed, which keeps the cursor and the undo history stable.
-- **Live sync between the raw and the pretty view.** Burp refreshes the Pretty tab while the raw
-  tab is being typed in. In ZAP the core text view keeps its own buffer until the panel is saved, so
-  the Pretty view follows the message, not the core view's buffer.
+- **The undo history.** The re-formatting replaces the text of the editor, so the undo step that
+  belongs to it is lost. ZAP's core text view keeps its buffer until the panel is saved, so the
+  Pretty view follows the message rather than the core view's buffer while it is being typed in.
