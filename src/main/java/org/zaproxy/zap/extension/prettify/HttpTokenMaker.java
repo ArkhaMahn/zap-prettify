@@ -4,7 +4,6 @@ import javax.swing.text.Segment;
 import org.fife.ui.rsyntaxtextarea.AbstractTokenMaker;
 import org.fife.ui.rsyntaxtextarea.Token;
 import org.fife.ui.rsyntaxtextarea.TokenMaker;
-import org.fife.ui.rsyntaxtextarea.TokenMakerFactory;
 import org.fife.ui.rsyntaxtextarea.TokenMap;
 import org.fife.ui.rsyntaxtextarea.TokenTypes;
 
@@ -62,10 +61,10 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
      * negative because RSTA only treats tokens with a positive type as paintable/measurable, so a
      * synthetic (non-token-type) state must never be positive.
      */
-    static final int BODY_BASE = -10_000_000;
+    static final int BODY_BASE = -13_000_000;
 
     /** Any line state at or below this value is an encoded body state. */
-    static final int BODY_DETECT = -9_000_000;
+    static final int BODY_DETECT = -11_000_000;
 
     private final boolean response;
     private final boolean headersOnly;
@@ -454,7 +453,7 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
                 // maker is itself wrapped.
                 bodyTokenMaker =
                         new ContinuedStringTokenMaker(
-                                TokenMakerFactory.getDefaultInstance().getTokenMaker(styleKey));
+                                PrettifyTokenMakerFactory.bodyTokenMaker(styleKey));
             }
         }
         return bodyTokenMaker;

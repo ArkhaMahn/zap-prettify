@@ -33,6 +33,19 @@ public class PrettifyTokenMakerFactory extends AbstractTokenMakerFactory {
                 || STYLE_HTTP_RESPONSE_HEAD.equals(key);
     }
 
+    /**
+     * The token maker for a body style. JavaScript bodies are wrapped so object literal keys and
+     * method names are painted like JSON keys and functions; every other style comes straight from
+     * RSTA's default factory.
+     */
+    static TokenMaker bodyTokenMaker(String key) {
+        TokenMaker tokenMaker = TokenMakerFactory.getDefaultInstance().getTokenMaker(key);
+        if (tokenMaker == null) {
+            return null;
+        }
+        return ContentType.isJavaScriptStyle(key) ? new JsTokenMaker(tokenMaker) : tokenMaker;
+    }
+
     @Override
     protected void initTokenMakerMap() {
         // Mappings are resolved directly in getTokenMakerImpl.
@@ -54,7 +67,7 @@ public class PrettifyTokenMakerFactory extends AbstractTokenMakerFactory {
             case ContentType.GRAPHQL_STYLE:
                 return TokenMakerFactory.getDefaultInstance().getTokenMaker(ContentType.PLAIN_STYLE);
             default:
-                return TokenMakerFactory.getDefaultInstance().getTokenMaker(key);
+                return bodyTokenMaker(key);
         }
     }
 }
