@@ -168,7 +168,7 @@ public class PrettifyHttpPanelView
         switch (target) {
             case REQUEST_ALL:
             case RESPONSE_ALL:
-                return PrettyPrint.formatMessage(ContentType.styleKeyFor(contentType), text);
+                return PrettyPrint.formatMessageFor(contentType, text);
             case REQUEST_BODY:
             case RESPONSE_BODY:
                 return PrettyPrint.formatBody(ContentType.styleKeyFor(contentType, text), text);
