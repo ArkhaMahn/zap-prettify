@@ -79,7 +79,7 @@ public class PrettifyHttpPanelView
     private Timer resplitTimer;
 
     /** Extra characters allowed beyond the strict wrap fit. */
-    private static final int EXTRA_WRAP_CHARS = 2;
+    private static final int EXTRA_WRAP_CHARS = 1;
 
     private String configurationKey = "";
 
