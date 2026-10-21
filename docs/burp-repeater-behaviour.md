@@ -87,15 +87,19 @@ ZAP has no separate "Repeater": the Requester, the manual request editor and Bre
   the characters that are not whitespace: the formatter only changes whitespace, so the position of
   the change in the message can be found by counting them. The message therefore keeps its own
   whitespace and only the change the user made is different.
-- The text is re-formatted shortly after it was typed, the way Burp does it in an editable message.
-  The message is written with the change, and the view is rendered again from it.
+- The text is left alone while it is typed: it does not jump under the cursor. The message is
+  written with the change when the panel is saved, and the view is rendered again from it, so the
+  Pretty view shows the formatted form again.
 - The wrap is only a display feature: the breaks the view inserts are removed again before the
   message is written.
 - The gutter numbers the rows that start a real message line; the wrapped rows and the rows the
   formatter added are left blank.
 
-### Differences that cannot be avoided in ZAP
+### Differences from Burp
 
-- **The undo history.** The re-formatting replaces the text of the editor, so the undo step that
-  belongs to it is lost. ZAP's core text view keeps its buffer until the panel is saved, so the
-  Pretty view follows the message rather than the core view's buffer while it is being typed in.
+- **No live prettification.** Burp re-formats the message while it is typed in an editable message.
+  Here the text stays as it was typed, so the cursor and the undo history stay stable; the
+  formatted form is shown again when the view is rendered from the message.
+- **The core text view has its own buffer.** ZAP's core text view keeps what was typed in it until
+  the panel is saved, so the Pretty view follows the message rather than the core view's buffer
+  while it is being typed in.

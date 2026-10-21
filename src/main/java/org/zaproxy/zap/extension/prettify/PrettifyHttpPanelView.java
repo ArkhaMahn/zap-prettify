@@ -123,9 +123,6 @@ public class PrettifyHttpPanelView
      */
     private int pendingCaretCount = -1;
 
-    /** Re-formats the text shortly after the user typed, the way Burp does. */
-    private Timer reformatTimer;
-
     /**
      * Start offsets of the rows the gutter numbers (the rows that are a line of the message).
      * Kept while the user edits, so the numbering follows the text as it is typed.
@@ -342,14 +339,12 @@ public class PrettifyHttpPanelView
                     public void insertUpdate(DocumentEvent e) {
                         changed = true;
                         textEdited(e.getOffset(), 0, e.getLength());
-                        scheduleReformat();
                     }
 
                     @Override
                     public void removeUpdate(DocumentEvent e) {
                         changed = true;
                         textEdited(e.getOffset(), e.getLength(), 0);
-                        scheduleReformat();
                     }
 
                     @Override
@@ -565,62 +560,6 @@ public class PrettifyHttpPanelView
             }
         }
         gutterRowsText = displayText;
-    }
-
-    /**
-     * Schedules the re-formatting of the text. Burp re-formats the message while it is typed in an
-     * editable message; the re-formatting waits for a short pause, so that it does not happen in
-     * the middle of a word.
-     */
-    private void scheduleReformat() {
-        if (!editable) {
-            return;
-        }
-        if (reformatTimer == null) {
-            reformatTimer =
-                    new Timer(
-                            400,
-                            e -> {
-                                try {
-                                    reformat();
-                                } catch (RuntimeException ex) {
-                                    LOGGER.warn("Could not re-format the message.", ex);
-                                }
-                            });
-            reformatTimer.setRepeats(false);
-        }
-        reformatTimer.restart();
-    }
-
-    /**
-     * Re-formats the text the user typed. The message keeps the text it was received with, with the
-     * change applied to it, and the view is rendered again from it, which shows the re-formatted
-     * text.
-     */
-    private void reformat() {
-        DisplayTextSplitter.Split activeSplit = split;
-        if (activeSplit == null) {
-            return;
-        }
-        String edited = textArea.getText();
-        String raw = rawText();
-        String formatted = projection(raw);
-        String editedFormatted = activeSplit.toMessageText(edited);
-        if (editedFormatted.equals(formatted)) {
-            return;
-        }
-        String newRaw = applyEditToRaw(raw, formatted, editedFormatted);
-        if (newRaw.equals(raw)) {
-            return;
-        }
-        pendingCaretCount = countNonWhitespace(edited, 0, textArea.getCaretPosition());
-        try {
-            model.setData(newRaw);
-        } catch (RuntimeException e) {
-            LOGGER.warn("Could not re-format the message.", e);
-            return;
-        }
-        update();
     }
 
     /**
