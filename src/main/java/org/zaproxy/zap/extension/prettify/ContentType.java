@@ -162,6 +162,56 @@ public final class ContentType {
     }
 
     /**
+     * The content type header value for a style, or null when the style does not name one. Used to
+     * fill in a missing content type of a request from the body it carries.
+     */
+    public static String contentTypeFor(String styleKey) {
+        if (styleKey == null) {
+            return null;
+        }
+        switch (styleKey) {
+            case JSON:
+                return "application/json";
+            case HTML:
+                return "text/html";
+            case XML:
+                return "text/xml";
+            case JAVASCRIPT:
+                return "application/javascript";
+            case TYPESCRIPT:
+                return "application/typescript";
+            case CSS:
+                return "text/css";
+            case LESS:
+                return "text/less";
+            case YAML:
+                return "application/yaml";
+            case CSV:
+                return "text/csv";
+            case MARKDOWN:
+                return "text/markdown";
+            case PHP:
+                return "application/x-httpd-php";
+            case SHELL:
+                return "application/x-sh";
+            case SQL:
+                return "application/sql";
+            case PYTHON:
+                return "text/x-python";
+            case RUBY:
+                return "text/x-ruby";
+            case PERL:
+                return "text/x-perl";
+            case GRAPHQL_STYLE:
+                return "application/graphql";
+            case FORM_STYLE:
+                return "application/x-www-form-urlencoded";
+            default:
+                return null;
+        }
+    }
+
+    /**
      * Resolves a style for a body, falling back to a sniff of {@code bodyPrefix} when the content
      * type is unknown, missing or {@code text/plain}. Binary types are never sniffed.
      */

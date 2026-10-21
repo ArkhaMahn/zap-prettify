@@ -1,6 +1,8 @@
 package org.zaproxy.zap.extension.prettify;
 
 import java.awt.Font;
+import java.awt.FontMetrics;
+import java.awt.font.FontRenderContext;
 
 import org.fife.ui.rsyntaxtextarea.RSyntaxDocument;
 import org.fife.ui.rsyntaxtextarea.RSyntaxTextArea;
@@ -49,6 +51,56 @@ public class PrettifyTextArea extends RSyntaxTextArea {
 
     /** Maps display offsets (which contain injected wrap breaks) back to the original text. */
     private DisplayTextSplitter.Split split;
+
+    /**
+     * The width of one character of the font, as the text is painted (the text area paints with
+     * fractional font metrics). It is 0 when the font is not monospaced.
+     */
+    private double advance() {
+        Font font = getFont();
+        if (font == null) {
+            return 0;
+        }
+        FontMetrics metrics = getFontMetrics(font);
+        int charWidth = metrics.charWidth('M');
+        if (metrics.charWidth('i') != charWidth || metrics.charWidth('W') != charWidth) {
+            return 0;
+        }
+        FontRenderContext frc = new FontRenderContext(null, true, true);
+        return font.createGlyphVector(frc, "M").getGlyphPosition(1).getX();
+    }
+
+    /**
+     * The offset in {@code token} of the character that is at {@code maxX} pixels from its start,
+     * for a monospaced font; -1 when the font is not monospaced.
+     */
+    int offsetBeforeX(org.fife.ui.rsyntaxtextarea.Token token, double maxX) {
+        double advance = advance();
+        int length = token.length();
+        if (advance <= 0 || length <= 0) {
+            return -1;
+        }
+        int fits = (int) (maxX / advance);
+        if (fits < 0) {
+            fits = 0;
+        }
+        if (fits > length) {
+            fits = length;
+        }
+        return token.getEndOffset() - length + fits;
+    }
+
+    /**
+     * The width of a token of {@code length} characters; -1 when the font is not monospaced and
+     * the width has to be measured.
+     */
+    float widthOf(int length) {
+        double advance = advance();
+        if (advance <= 0) {
+            return -1;
+        }
+        return (float) (length * advance);
+    }
 
     public PrettifyTextArea(boolean dark) {
         this.dark = dark;

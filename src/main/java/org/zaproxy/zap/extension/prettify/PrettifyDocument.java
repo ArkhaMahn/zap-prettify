@@ -1,5 +1,7 @@
 package org.zaproxy.zap.extension.prettify;
 
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
 import javax.swing.text.BadLocationException;
 import javax.swing.text.Element;
 import javax.swing.text.Segment;
@@ -36,7 +38,8 @@ public class PrettifyDocument extends RSyntaxDocument {
     private final boolean http;
     private final boolean markupStyle;
     private final boolean scriptStyle;
-    private final int[] continuationStarts;
+    /** Start offsets of the rows that continue the line above them; moved when the text changes. */
+    private int[] continuationStarts;
     private final TokenMaker stateTokenMaker;
     private final TokenMaker fallbackTokenMaker;
     private final Segment segment = new Segment();
@@ -48,11 +51,33 @@ public class PrettifyDocument extends RSyntaxDocument {
     private Token cachedTokenList;
     private int cachedTokenLine = -1;
 
+    /**
+     * Set once the text was changed in the text area. The recorded tokens describe the text as it
+     * was split, so they no longer match the document and the document stops replaying them.
+     */
+    private volatile boolean edited;
+
+    /**
+     * Whether the recorded tokens may be replayed. A document that is edited in the text area
+     * cannot replay them (they describe the text as it was split), and an editable document is
+     * built with the replay switched off from the start.
+     */
+    private final boolean replayEnabled;
+
     public PrettifyDocument(
             TokenMakerFactory tokenMakerFactory,
             String styleKey,
             DisplayTextSplitter.Split split) {
+        this(tokenMakerFactory, styleKey, split, true);
+    }
+
+    public PrettifyDocument(
+            TokenMakerFactory tokenMakerFactory,
+            String styleKey,
+            DisplayTextSplitter.Split split,
+            boolean replayEnabled) {
         super(tokenMakerFactory, styleKey);
+        this.replayEnabled = replayEnabled;
         this.tokenStarts = split == null ? new int[0] : split.tokenStarts();
         this.tokenEnds = split == null ? new int[0] : split.tokenEnds();
         this.tokenTypes = split == null ? new int[0] : split.tokenTypes();
@@ -81,6 +106,59 @@ public class PrettifyDocument extends RSyntaxDocument {
         return starts;
     }
 
+    /**
+     * Watches the document for changes made in the text area. Called once the text has been
+     * inserted, so that filling the document is not seen as an edit.
+     */
+    public void watchForEdits() {
+        addDocumentListener(
+                new DocumentListener() {
+                    @Override
+                    public void insertUpdate(DocumentEvent e) {
+                        markEdited(e);
+                        markInserted(e.getOffset(), e.getLength());
+                    }
+
+                    @Override
+                    public void removeUpdate(DocumentEvent e) {
+                        markEdited(e);
+                        markRemoved(e.getOffset(), e.getLength());
+                    }
+
+                    @Override
+                    public void changedUpdate(DocumentEvent e) {
+                        // Style change only, the text is the same.
+                    }
+                });
+    }
+
+    /**
+     * Notes that the text was changed: the recorded tokens no longer describe the document, and the
+     * line states carried from the top are stale from the edited line on, so they are recomputed
+     * from the text as it is now.
+     */
+    private void markEdited(DocumentEvent e) {
+        edited = true;
+        int offset = e.getOffset();
+        if (offset < 0) {
+            return;
+        }
+        int line = getDefaultRootElement().getElementIndex(offset);
+        computedUpTo = Math.max(-1, line - 1);
+    }
+
+    /** Notes an edit of the text: the rows that continue a line move with it. */
+    private void markInserted(int offset, int inserted) {
+        continuationStarts =
+                DisplayTextSplitter.shiftOffsets(continuationStarts, offset, 0, inserted);
+    }
+
+    /** Notes the removal of text: the rows that continue a line move with it. */
+    private void markRemoved(int offset, int removed) {
+        continuationStarts =
+                DisplayTextSplitter.shiftOffsets(continuationStarts, offset, removed, 0);
+    }
+
     @Override
     public Token getTokenListForLine(int line) {
         Token list = tokenListForLine(line);
@@ -104,11 +182,11 @@ public class PrettifyDocument extends RSyntaxDocument {
     }
 
     private Token tokenListForLine(int line) {
-        if (tokenStarts.length != 0 && lineHasSpans(line)) {
+        if (replayEnabled && !edited && tokenStarts.length != 0 && lineHasSpans(line)) {
             return replayTokenList(line);
         }
         if (!http) {
-            if (tokenStarts.length != 0) {
+            if (replayEnabled && !edited && tokenStarts.length != 0) {
                 return fallbackTokenList(line);
             }
             return super.getTokenListForLine(line);
@@ -118,7 +196,8 @@ public class PrettifyDocument extends RSyntaxDocument {
         }
         Element root = getDefaultRootElement();
         if (line < 0 || line >= root.getElementCount()) {
-            return super.getTokenListForLine(line);
+            // The line is gone (the text was edited); there is nothing to paint.
+            return null;
         }
         Element lineElement = root.getElement(line);
         int start = lineElement.getStartOffset();
@@ -141,11 +220,11 @@ public class PrettifyDocument extends RSyntaxDocument {
 
     @Override
     public int getLastTokenTypeOnLine(int line) {
-        if (tokenStarts.length != 0 && lineHasSpans(line)) {
+        if (replayEnabled && !edited && tokenStarts.length != 0 && lineHasSpans(line)) {
             return replayLastTokenType(line);
         }
         if (!http) {
-            if (tokenStarts.length != 0) {
+            if (replayEnabled && !edited && tokenStarts.length != 0) {
                 return fallbackLastType(line);
             }
             return super.getLastTokenTypeOnLine(line);
@@ -332,7 +411,8 @@ public class PrettifyDocument extends RSyntaxDocument {
         }
         Element root = getDefaultRootElement();
         if (line < 0 || line >= root.getElementCount()) {
-            return super.getTokenListForLine(line);
+            // The line is gone (the text was edited); there is nothing to paint.
+            return null;
         }
         Element lineElement = root.getElement(line);
         int start = lineElement.getStartOffset();

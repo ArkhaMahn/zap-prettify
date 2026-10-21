@@ -758,6 +758,29 @@ public final class DisplayTextSplitter {
     }
 
     /**
+     * Moves the offsets that are after an edited range; the ones inside it are gone. Used to
+     * follow the rows of a document that is edited in the text area.
+     */
+    static int[] shiftOffsets(int[] offsets, int offset, int removed, int inserted) {
+        int delta = inserted - removed;
+        int[] shifted = new int[offsets.length];
+        int count = 0;
+        for (int o : offsets) {
+            if (o < offset) {
+                shifted[count++] = o;
+            } else if (o >= offset + removed) {
+                shifted[count++] = o + delta;
+            }
+        }
+        if (count == shifted.length) {
+            return shifted;
+        }
+        int[] trimmed = new int[count];
+        System.arraycopy(shifted, 0, trimmed, 0, count);
+        return trimmed;
+    }
+
+    /**
      * Builds, for every display line (0-based), the 1-based number of the original message line it
      * belongs to, or {@code 0} if the line is a continuation produced by an inserted break. The
      * gutter uses this so wrapped/inserted rows are not numbered - only real message lines are.
@@ -847,6 +870,17 @@ public final class DisplayTextSplitter {
         for (int i = 0; i < formatted.length(); i++) {
             char c = formatted.charAt(i);
             if (c == '\n') {
+                if (!seenOnLine) {
+                    // A line with no content: the blank line that ends the header block is a line
+                    // of the message like any other and is numbered, while a blank line the pretty
+                    // printer added inside a body is not.
+                    int blank = blankSourceLineAt(source, sourceIndex, sourceLine);
+                    if (blank > 0) {
+                        map[formattedLine] = blank;
+                        sourceLine = blank;
+                        sourceIndex = blankLineEnd(source, sourceIndex);
+                    }
+                }
                 formattedLine++;
                 seenOnLine = false;
                 continue;
@@ -871,6 +905,45 @@ public final class DisplayTextSplitter {
         }
         return map;
     }
+
+    /**
+     * The line of the source a blank line of the formatted text stands for, or 0 when there is
+     * none: the line after the one the source pointer is on, but only when that line is blank too.
+     */
+    private static int blankSourceLineAt(String source, int sourceIndex, int sourceLine) {
+        int n = source.length();
+        int index = sourceIndex;
+        while (index < n && source.charAt(index) != '\n') {
+            if (!Character.isWhitespace(source.charAt(index))) {
+                return 0;
+            }
+            index++;
+        }
+        if (index >= n) {
+            return 0;
+        }
+        index++;
+        int end = index;
+        while (end < n && source.charAt(end) != '\n') {
+            if (!Character.isWhitespace(source.charAt(end))) {
+                return 0;
+            }
+            end++;
+        }
+        // The line holds nothing but whitespace, so it is a blank line of the message.
+        return sourceLine + 1;
+    }
+
+    /** Offset just past the blank line the source pointer is on. */
+    private static int blankLineEnd(String source, int sourceIndex) {
+        int n = source.length();
+        int index = sourceIndex;
+        while (index < n && source.charAt(index) != '\n') {
+            index++;
+        }
+        return index < n ? index + 1 : n;
+    }
+
 
     /**
      * Builds the per-display-line numbers from a formatted-line-to-original-line map: a display row
@@ -1007,6 +1080,81 @@ public final class DisplayTextSplitter {
          */
         public int[] breakIndents() {
             return breakIndents;
+        }
+
+        /**
+         * Turns text edited in the wrapped display back into message text: the line breaks this
+         * split inserted (and the indentation it copied onto the continuation rows) are taken out
+         * again, so what is left is the message as it was, with the user's changes.
+         *
+         * <p>The edited text is matched against the display text that was installed: the unchanged
+         * head and tail of the two are known to correspond, so the breaks in them can be located
+         * and removed, while the part the user actually changed is kept as they typed it.
+         */
+        public String toMessageText(String edited) {
+            if (edited == null) {
+                return null;
+            }
+            if (edited.equals(displayText)) {
+                return edited;
+            }
+            int prefix = 0;
+            int limit = Math.min(displayText.length(), edited.length());
+            while (prefix < limit && displayText.charAt(prefix) == edited.charAt(prefix)) {
+                prefix++;
+            }
+            int suffix = 0;
+            while (suffix < limit - prefix
+                    && displayText.charAt(displayText.length() - 1 - suffix)
+                            == edited.charAt(edited.length() - 1 - suffix)) {
+                suffix++;
+            }
+            int[] inserted = insertedOffsets();
+            StringBuilder out = new StringBuilder(edited.length());
+            appendUnwrapped(out, edited, 0, prefix, 0, inserted);
+            out.append(edited, prefix, edited.length() - suffix);
+            appendUnwrapped(
+                    out,
+                    edited,
+                    edited.length() - suffix,
+                    edited.length(),
+                    displayText.length() - suffix,
+                    inserted);
+            return out.toString();
+        }
+
+        /** Offsets of the characters the split inserted: the breaks and their indentation. */
+        private int[] insertedOffsets() {
+            int count = 0;
+            for (int i = 0; i < breakOffsets.length; i++) {
+                count += 1 + (i < breakIndents.length ? breakIndents[i] : 0);
+            }
+            int[] inserted = new int[count];
+            int at = 0;
+            for (int i = 0; i < breakOffsets.length; i++) {
+                inserted[at++] = breakOffsets[i];
+                int indent = i < breakIndents.length ? breakIndents[i] : 0;
+                for (int j = 1; j <= indent; j++) {
+                    inserted[at++] = breakOffsets[i] + j;
+                }
+            }
+            Arrays.sort(inserted);
+            return inserted;
+        }
+
+        /**
+         * Appends the edited text, skipping the characters the split inserted. The edited range
+         * {@code [from, to)} corresponds to the display range starting at {@code displayFrom}.
+         */
+        private static void appendUnwrapped(
+                StringBuilder out, String edited, int from, int to, int displayFrom, int[] inserted) {
+            for (int i = from; i < to; i++) {
+                int displayOffset = displayFrom + (i - from);
+                if (Arrays.binarySearch(inserted, displayOffset) >= 0) {
+                    continue;
+                }
+                out.append(edited.charAt(i));
+            }
         }
 
         /**

@@ -5,6 +5,7 @@ import org.apache.logging.log4j.Logger;
 import org.parosproxy.paros.Constant;
 import org.parosproxy.paros.extension.ExtensionAdaptor;
 import org.parosproxy.paros.extension.ExtensionHook;
+import java.util.function.Supplier;
 import org.zaproxy.zap.extension.httppanel.component.split.request.RequestSplitComponent;
 import org.zaproxy.zap.extension.httppanel.view.AbstractStringHttpPanelViewModel;
 import org.zaproxy.zap.extension.httppanel.view.HttpPanelView;
@@ -73,7 +74,7 @@ public class ExtensionPrettify extends ExtensionAdaptor {
                         RequestSplitComponent.ViewComponent.HEADER,
                         "prettify/http-request-head",
                         PrettifyHttpPanelView.Target.REQUEST_HEAD,
-                        new RequestHeaderStringHttpPanelViewModel()));
+                        RequestHeaderStringHttpPanelViewModel::new));
         panelManager.addRequestViewFactory(
                 "RequestSplit",
                 new SplitViewFactory(
@@ -81,7 +82,7 @@ public class ExtensionPrettify extends ExtensionAdaptor {
                         RequestSplitComponent.ViewComponent.BODY,
                         null,
                         PrettifyHttpPanelView.Target.REQUEST_BODY,
-                        new RequestBodyStringHttpPanelViewModel()));
+                        RequestBodyStringHttpPanelViewModel::new));
         panelManager.addResponseViewFactory(
                 "ResponseSplit",
                 new SplitViewFactory(
@@ -89,7 +90,7 @@ public class ExtensionPrettify extends ExtensionAdaptor {
                         RequestSplitComponent.ViewComponent.HEADER,
                         "prettify/http-response-head",
                         PrettifyHttpPanelView.Target.RESPONSE_HEAD,
-                        new ResponseHeaderStringHttpPanelViewModel()));
+                        ResponseHeaderStringHttpPanelViewModel::new));
         panelManager.addResponseViewFactory(
                 "ResponseSplit",
                 new SplitViewFactory(
@@ -97,21 +98,21 @@ public class ExtensionPrettify extends ExtensionAdaptor {
                         RequestSplitComponent.ViewComponent.BODY,
                         null,
                         PrettifyHttpPanelView.Target.RESPONSE_BODY,
-                        new ResponseBodyStringHttpPanelViewModel()));
+                        ResponseBodyStringHttpPanelViewModel::new));
         panelManager.addRequestViewFactory(
                 "RequestAll",
                 new AllViewFactory(
                         VIEW_REQUEST_ALL,
                         "prettify/http-request",
                         PrettifyHttpPanelView.Target.REQUEST_ALL,
-                        new RequestStringHttpPanelViewModel()));
+                        RequestStringHttpPanelViewModel::new));
         panelManager.addResponseViewFactory(
                 "ResponseAll",
                 new AllViewFactory(
                         VIEW_RESPONSE_ALL,
                         "prettify/http-response",
                         PrettifyHttpPanelView.Target.RESPONSE_ALL,
-                        new ResponseStringHttpPanelViewModel()));
+                        ResponseStringHttpPanelViewModel::new));
     }
 
     @Override
@@ -160,19 +161,19 @@ public class ExtensionPrettify extends ExtensionAdaptor {
         private final Object viewComponent;
         private final String styleKey;
         private final PrettifyHttpPanelView.Target target;
-        private final AbstractStringHttpPanelViewModel model;
+        private final Supplier<AbstractStringHttpPanelViewModel> models;
 
         SplitViewFactory(
                 String name,
                 Object viewComponent,
                 String styleKey,
                 PrettifyHttpPanelView.Target target,
-                AbstractStringHttpPanelViewModel model) {
+                Supplier<AbstractStringHttpPanelViewModel> models) {
             this.name = name;
             this.viewComponent = viewComponent;
             this.styleKey = styleKey;
             this.target = target;
-            this.model = model;
+            this.models = models;
         }
 
         @Override
@@ -182,7 +183,10 @@ public class ExtensionPrettify extends ExtensionAdaptor {
 
         @Override
         public HttpPanelView getNewView() {
-            return new PrettifyHttpPanelView(name, CAPTION_KEY, styleKey, target, model);
+            // Every view needs its own model: the model holds the message the view shows, so a
+            // shared one would make all the panels (the Requester tabs, Break, ...) show whichever
+            // message was set last.
+            return new PrettifyHttpPanelView(name, CAPTION_KEY, styleKey, target, models.get());
         }
 
         @Override
@@ -196,17 +200,17 @@ public class ExtensionPrettify extends ExtensionAdaptor {
         private final String name;
         private final String styleKey;
         private final PrettifyHttpPanelView.Target target;
-        private final AbstractStringHttpPanelViewModel model;
+        private final Supplier<AbstractStringHttpPanelViewModel> models;
 
         AllViewFactory(
                 String name,
                 String styleKey,
                 PrettifyHttpPanelView.Target target,
-                AbstractStringHttpPanelViewModel model) {
+                Supplier<AbstractStringHttpPanelViewModel> models) {
             this.name = name;
             this.styleKey = styleKey;
             this.target = target;
-            this.model = model;
+            this.models = models;
         }
 
         @Override
@@ -216,7 +220,10 @@ public class ExtensionPrettify extends ExtensionAdaptor {
 
         @Override
         public HttpPanelView getNewView() {
-            return new PrettifyHttpPanelView(name, CAPTION_KEY, styleKey, target, model);
+            // Every view needs its own model: the model holds the message the view shows, so a
+            // shared one would make all the panels (the Requester tabs, Break, ...) show whichever
+            // message was set last.
+            return new PrettifyHttpPanelView(name, CAPTION_KEY, styleKey, target, models.get());
         }
 
         @Override

@@ -17,7 +17,9 @@ public final class PrettifyLineNumberFormatter implements LineNumberFormatter {
 
     public PrettifyLineNumberFormatter(int[] displayLineNumbers, int originalLineCount) {
         this.displayLineNumbers = displayLineNumbers;
-        this.maxLength = Math.max(1, Integer.toString(originalLineCount).length());
+        // RTextArea sizes the gutter from getMaxLength() + 1 digit, so ask for one digit less than
+        // the widest number actually shown; otherwise the column keeps a blank digit of padding.
+        this.maxLength = Math.max(0, Integer.toString(originalLineCount).length() - 1);
     }
 
     @Override

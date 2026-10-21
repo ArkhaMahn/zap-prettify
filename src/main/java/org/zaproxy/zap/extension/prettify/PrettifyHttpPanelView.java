@@ -1,12 +1,15 @@
 package org.zaproxy.zap.extension.prettify;
 
 import java.awt.BorderLayout;
+import java.awt.Component;
 import java.awt.Font;
+import java.awt.FontMetrics;
 import java.awt.Insets;
 import java.awt.event.ComponentAdapter;
 import java.awt.event.ComponentEvent;
 import java.awt.font.FontRenderContext;
 import java.util.List;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.swing.JComponent;
@@ -14,14 +17,20 @@ import javax.swing.JPanel;
 import javax.swing.ScrollPaneConstants;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
 import javax.swing.text.DefaultHighlighter;
+import javax.swing.text.Document;
 import javax.swing.text.Highlighter;
 import org.apache.commons.configuration.FileConfiguration;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.fife.ui.rsyntaxtextarea.RSyntaxDocument;
 import org.fife.ui.rtextarea.Gutter;
 import org.fife.ui.rtextarea.RTextScrollPane;
 import org.parosproxy.paros.Constant;
 import org.parosproxy.paros.network.HttpMessage;
+import org.parosproxy.paros.network.HttpRequestHeader;
 import org.zaproxy.zap.extension.httppanel.Message;
 import org.zaproxy.zap.extension.httppanel.view.AbstractStringHttpPanelViewModel;
 import org.zaproxy.zap.extension.httppanel.view.HttpPanelView;
@@ -46,6 +55,8 @@ import org.zaproxy.zap.utils.DisplayUtils;
  */
 public class PrettifyHttpPanelView
         implements HttpPanelView, HttpPanelViewModelListener, SearchableHttpPanelView {
+
+    private static final Logger LOGGER = LogManager.getLogger(PrettifyHttpPanelView.class);
 
     /** Which part of an HTTP message this view shows. */
     public enum Target {
@@ -73,10 +84,67 @@ public class PrettifyHttpPanelView
     private volatile long generation;
 
     /** Wrap width (in pixels) the current document was split for; -1 means "unknown". */
-    private int wrappedWidthPx = -1;
+    private volatile int wrappedWidthPx = -1;
+
+    /** Width of one digit in the gutter font, or -1 until measured. */
+    private int gutterDigitWidth = -1;
+
+    /**
+     * Gutter width minus the digits it reserves ({@code digitWidth * (digits + 1)}), measured from
+     * a laid-out gutter; -1 until measured. The rest (borders, padding) is constant for a given
+     * Look and Feel, so the width for another line count can be predicted before the new document
+     * is installed.
+     */
+    private int gutterFixedWidth = -1;
+
+    /** Line-number digits of the installed document, used to calibrate {@link #gutterFixedWidth}. */
+    private int installedDigits = -1;
+
+    /**
+     * Re-splits spent on correcting the wrap width after a document was laid out. A layout can
+     * hand the view less room than the viewport extent suggests (the viewport is sized before the
+     * gutter and the scrollbar settle), which would leave the rows short of the right edge. Bounded
+     * so a scrollbar appearing/disappearing cannot make the two widths trade places forever.
+     */
+    private int widthCorrections;
 
     /** Debounces re-splitting while the panel is being resized. */
     private Timer resplitTimer;
+
+    /** Whether the panel this view is mounted in allows the message to be edited. */
+    private volatile boolean editable;
+
+    /** Whether the user changed the displayed text since it was loaded or last saved. */
+    private boolean changed;
+
+    /** Caret offset to restore once the view has been re-rendered after a save. */
+    private int pendingCaretOffset = -1;
+
+    /**
+     * Start offsets of the rows the gutter numbers (the rows that are a line of the message).
+     * Kept while the user edits, so the numbering follows the text as it is typed.
+     */
+    private int[] numberedOffsets = new int[0];
+
+    /**
+     * Start offsets of the rows the gutter leaves blank: the rows a wrapped line continues in and
+     * the rows the pretty printer added.
+     */
+    private int[] blankOffsets = new int[0];
+
+    /** The display text the row offsets above belong to. */
+    private String gutterRowsText = "";
+
+    /**
+     * The request body the view last showed. ZAP moves the body into the query string when the
+     * method changes away from POST and moves it back when it changes to POST; on the way back a
+     * parameter that has no value is re-encoded as {@code name=}, so the body comes back with a
+     * "=" it never had. The body is remembered so that this can be undone.
+     */
+    private String lastShownBody = "";
+
+    /** The request method the view last showed, to notice a change of the verb. */
+    private String lastShownMethod = "";
 
     private String configurationKey = "";
 
@@ -142,11 +210,21 @@ public class PrettifyHttpPanelView
     }
 
     private void update() {
+        widthCorrections = 0;
+        int widthPx = predictedWrapWidthPx();
+        update(widthPx > 0 ? widthPx : wrapMaxWidthPx());
+    }
+
+    /**
+     * Starts a background split for {@code widthPx}. The width usually comes from the viewport, but
+     * a layout can hand the text area less room than the viewport suggests; {@link #install} then
+     * corrects it from the width the text area really has.
+     */
+    private void update(final int widthPx) {
         Message message = model.getMessage();
         final String data = model.getData();
         final String contentType = contentTypeOf(message);
         final boolean stripTrailing = shouldStripTrailingNewlines(message);
-        final int widthPx = wrapMaxWidthPx();
         final long gen = ++generation;
         wrappedWidthPx = widthPx;
 
@@ -160,8 +238,7 @@ public class PrettifyHttpPanelView
                                 // The gutter keeps the original message line numbers: pass the text
                                 // as it is without formatting (only the header-block cleanup) so
                                 // reformat-inserted lines are not numbered.
-                                numbering =
-                                        stripTrailing ? stripTrailingNewlines(data) : data;
+                                numbering = stripTrailing ? stripTrailingNewlines(data) : data;
                             }
                             prepareAndInstall(
                                     text, numbering, styleFor(contentType, text), widthPx, gen);
@@ -177,13 +254,30 @@ public class PrettifyHttpPanelView
         switch (target) {
             case REQUEST_ALL:
             case RESPONSE_ALL:
-                return PrettyPrint.formatMessageFor(contentType, text);
+                return PrettyPrint.formatMessageFor(contentType, text, reformatBody(contentType, text));
             case REQUEST_BODY:
             case RESPONSE_BODY:
-                return PrettyPrint.formatBody(ContentType.styleKeyFor(contentType, text), text);
+                return reformatBody(contentType, text)
+                        ? PrettyPrint.formatBody(ContentType.styleKeyFor(contentType, text), text)
+                        : text;
             default:
                 return stripTrailing ? stripTrailingNewlines(text) : text;
         }
+    }
+
+    /**
+     * Whether the body may be re-formatted. A form body is not: the formatted form puts every
+     * parameter on its own line and drops the separators, which would change the body that is sent.
+     */
+    private boolean reformatBody(String contentType, String text) {
+        if (!editable) {
+            return true;
+        }
+        String body = bodyOf(text);
+        if (body == null) {
+            return true;
+        }
+        return !ContentType.FORM_STYLE.equals(ContentType.styleKeyFor(contentType, body));
     }
 
     /**
@@ -195,13 +289,17 @@ public class PrettifyHttpPanelView
             final String text,
             final String numberingSource,
             final String style,
-            final int widthPx,
+            int widthPx,
             final long gen) {
-        final DisplayTextSplitter.Split newSplit =
+        final DisplayTextSplitter.Split prepared =
                 DisplayTextSplitter.split(text, numberingSource, style, widthPx, charWidths());
+        if (prepared == null) {
+            return;
+        }
+        wrappedWidthPx = widthPx;
         final RSyntaxDocument document =
                 ChunkedTextLoader.buildDocument(
-                        newSplit.displayText(), style, newSplit, () -> gen != generation);
+                        prepared.displayText(), style, prepared, () -> gen != generation, editable);
         if (document == null) {
             return;
         }
@@ -210,16 +308,390 @@ public class PrettifyHttpPanelView
                     if (gen != generation) {
                         return;
                     }
-                    install(newSplit, document);
+                    install(prepared, document, gen);
                 });
     }
 
     /** Swaps in the prepared document. Must run on the EDT. */
-    private void install(DisplayTextSplitter.Split newSplit, RSyntaxDocument document) {
+    private void install(DisplayTextSplitter.Split newSplit, RSyntaxDocument document, long gen) {
         split = newSplit;
         ChunkedTextLoader.installDocument(textArea, document, textArea::discardAllEdits);
+        trackUserEdits();
         textArea.setSplit(newSplit);
+        captureGutterRows(newSplit);
         applyLineNumbering(newSplit);
+        installedDigits = digits(newSplit.originalLineCount());
+        // The text the user sees is the text we installed, so any earlier edit is gone.
+        changed = false;
+        restoreCaret();
+        rememberBody();
+        // The document is laid out once the pending revalidation has run; only then does the text
+        // area report the width it can really paint in.
+        Timer check =
+                new Timer(
+                        30,
+                        e -> {
+                            calibrateGutter();
+                            correctWrapWidth(gen);
+                        });
+        check.setRepeats(false);
+        check.start();
+    }
+
+    /**
+     * Watches the installed document so that a user edit is noticed. Only insertions and removals
+     * count: the syntax highlighting changes styles (not content) while the text is painted.
+     */
+    private void trackUserEdits() {
+        Document document = textArea.getDocument();
+        if (document == null) {
+            return;
+        }
+        document.addDocumentListener(
+                new DocumentListener() {
+                    @Override
+                    public void insertUpdate(DocumentEvent e) {
+                        changed = true;
+                        textEdited(e.getOffset(), 0, e.getLength());
+                    }
+
+                    @Override
+                    public void removeUpdate(DocumentEvent e) {
+                        changed = true;
+                        textEdited(e.getOffset(), e.getLength(), 0);
+                    }
+
+                    @Override
+                    public void changedUpdate(DocumentEvent e) {
+                        // Style change only, the text is the same.
+                    }
+                });
+    }
+
+    /** Puts the caret back where the user left it after the view was re-rendered. */
+    private void restoreCaret() {
+        if (pendingCaretOffset < 0) {
+            return;
+        }
+        int offset = pendingCaretOffset;
+        pendingCaretOffset = -1;
+        try {
+            int length = textArea.getDocument().getLength();
+            textArea.setCaretPosition(Math.min(offset, length));
+        } catch (Exception ignored) {
+            // The document shrank; leave the caret where it is.
+        }
+    }
+
+    /**
+     * Wrap width predicted from the current viewport and the line-number gutter the new message
+     * will need, or 0 while either is unknown. Using the current extent directly would size the
+     * split for the previous message's gutter (its digit count differs), and the installed
+     * document would then have to be re-wrapped once the new gutter had been laid out. The vertical
+     * scrollbar is always shown, so the extent minus the gutter is the only changing part.
+     */
+    private int predictedWrapWidthPx() {
+        int extentWidth = scrollPane.getViewport().getExtentSize().width;
+        Gutter gutter = scrollPane.getGutter();
+        int currentGutterWidth = gutter == null ? 0 : gutter.getWidth();
+        if (extentWidth <= 0 || currentGutterWidth <= 0) {
+            return 0;
+        }
+        int gutterWidth = predictedGutterWidth(predictedLineNumberDigits());
+        if (gutterWidth <= 0) {
+            return 0;
+        }
+        int width = extentWidth - gutterWidth + currentGutterWidth;
+        Insets insets = textArea.getInsets();
+        if (insets != null) {
+            width -= insets.left + insets.right;
+        }
+        Insets margin = textArea.getMargin();
+        if (margin != null) {
+            width -= margin.left + margin.right;
+        }
+        return Math.max(0, width);
+    }
+
+    /** Width the gutter will have for a document whose last line number has {@code digits}. */
+    private int predictedGutterWidth(int digits) {
+        int step = gutterDigitWidth();
+        if (step <= 0 || gutterFixedWidth < 0) {
+            return -1;
+        }
+        return gutterFixedWidth + step * digits;
+    }
+
+    /** Width of one digit in the gutter's own (smaller) line-number font. */
+    private int gutterDigitWidth() {
+        if (gutterDigitWidth > 0) {
+            return gutterDigitWidth;
+        }
+        Gutter gutter = scrollPane.getGutter();
+        if (gutter == null || gutter.getComponentCount() == 0) {
+            return -1;
+        }
+        Component numbers = gutter.getComponent(0);
+        Font font = numbers.getFont();
+        if (font == null) {
+            return -1;
+        }
+        int step = numbers.getFontMetrics(font).charWidth('9');
+        if (step > 0) {
+            gutterDigitWidth = step;
+        }
+        return gutterDigitWidth;
+    }
+
+    /**
+     * Learns the gutter's fixed part (borders and padding) from a laid-out gutter, so the width for
+     * another digit count can be predicted exactly before installing its document.
+     */
+    private void calibrateGutter() {
+        Gutter gutter = scrollPane.getGutter();
+        int step = gutterDigitWidth();
+        if (gutter == null || step <= 0 || installedDigits <= 0 || gutter.getWidth() <= 0) {
+            return;
+        }
+        int fixed = gutter.getWidth() - step * installedDigits;
+        if (fixed >= 0 && fixed < 64) {
+            gutterFixedWidth = fixed;
+        }
+    }
+
+    /** Line-number digits the message being shown will need. */
+    private int predictedLineNumberDigits() {
+        String data = model.getData();
+        if (data == null) {
+            return 1;
+        }
+        if (shouldStripTrailingNewlines(model.getMessage())) {
+            data = stripTrailingNewlines(data);
+        }
+        int lines = 1;
+        for (int i = 0; i < data.length(); i++) {
+            if (data.charAt(i) == '\n') {
+                lines++;
+            }
+        }
+        return digits(lines);
+    }
+
+    private static int digits(int value) {
+        return Math.max(1, Integer.toString(Math.max(1, value)).length());
+    }
+
+    /**
+     * Fills the rows to the width the view can really paint in. The viewport extent can be wider
+     * than the space the text area ends up with (row header and scrollbar widths are only settled
+     * after a layout pass); splitting for the stale, narrower width would otherwise leave a few
+     * characters unused at the right edge.
+     */
+    private void correctWrapWidth(long gen) {
+        if (editable || gen != generation || widthCorrections >= 2 || wrappedWidthPx <= 0 || changed) {
+            return;
+        }
+        int widthPx = drawableWidthPx();
+        if (widthPx <= 0) {
+            return;
+        }
+        int target = widthPx;
+        int advance = Math.max(1, textArea.getFontMetrics(textArea.getFont()).charWidth('M'));
+        // Ignore sub-character differences (rounding), but both a gap of a whole character and a
+        // row that paints past the visible edge are worth one more split.
+        if (target - wrappedWidthPx < advance && wrappedWidthPx - target < 2 * advance) {
+            return;
+        }
+        widthCorrections++;
+        update(target);
+    }
+
+    /**
+     * Width, in pixels, the text area can draw in right now, or 0 if it has not been laid out yet.
+     * Uses the visible part of the component, so a text area wider than its viewport (a long line
+     * before the split) is clipped to what is actually shown.
+     */
+    private int drawableWidthPx() {
+        int width = textArea.getVisibleRect().width;
+        if (width <= 0) {
+            width = textArea.getWidth();
+        }
+        if (width <= 0) {
+            width = scrollPane.getViewport().getExtentSize().width;
+        }
+        if (width <= 0) {
+            return 0;
+        }
+        Insets insets = textArea.getInsets();
+        if (insets != null) {
+            width -= insets.left + insets.right;
+        }
+        Insets margin = textArea.getMargin();
+        if (margin != null) {
+            width -= margin.left + margin.right;
+        }
+        return Math.max(0, width);
+    }
+
+    /**
+     * Notes which rows the gutter numbers and which it leaves blank. The rows are found by their
+     * offset in the text, so they can be followed when the user edits the text.
+     */
+    private void captureGutterRows(DisplayTextSplitter.Split newSplit) {
+        if (!editable) {
+            numberedOffsets = new int[0];
+            blankOffsets = new int[0];
+            gutterRowsText = "";
+            return;
+        }
+        String displayText = newSplit.displayText();
+        if (displayText.equals(gutterRowsText)) {
+            // The text did not change, so the rows are the ones that are already known.
+            return;
+        }
+        int[] numbers = newSplit.displayLineNumbers();
+        int[] starts = rowStarts(displayText);
+        int count = Math.min(numbers.length, starts.length);
+        int numbered = 0;
+        int blank = 0;
+        for (int i = 0; i < count; i++) {
+            if (numbers[i] > 0) {
+                numbered++;
+            } else {
+                blank++;
+            }
+        }
+        numberedOffsets = new int[numbered];
+        blankOffsets = new int[blank];
+        int at = 0;
+        int blankAt = 0;
+        for (int i = 0; i < count; i++) {
+            if (numbers[i] > 0) {
+                numberedOffsets[at++] = starts[i];
+            } else {
+                blankOffsets[blankAt++] = starts[i];
+            }
+        }
+        gutterRowsText = displayText;
+    }
+
+    /**
+     * Follows an edit made in the text area: the rows after it move, and the numbering is brought
+     * up to date so the lines the user added are numbered like the ones that were there before.
+     */
+    private void textEdited(int offset, int removed, int inserted) {
+        if (!editable) {
+            return;
+        }
+        // The rows the edit creates are part of the row they were typed in, so they are numbered
+        // like it.
+        int[] created = inserted > 0 ? createdRowStarts(offset, inserted) : new int[0];
+        boolean blank = isBlankRow(rowStartAt(offset));
+        numberedOffsets =
+                DisplayTextSplitter.shiftOffsets(numberedOffsets, offset, removed, inserted);
+        blankOffsets = DisplayTextSplitter.shiftOffsets(blankOffsets, offset, removed, inserted);
+        if (blank) {
+            for (int start : created) {
+                blankOffsets = insertOffset(blankOffsets, start);
+            }
+        }
+        updateEditableNumbering();
+    }
+
+    /** Start offsets of the rows the inserted text created. */
+    private int[] createdRowStarts(int offset, int inserted) {
+        Document document = textArea.getDocument();
+        String text;
+        try {
+            text = document.getText(offset, inserted);
+        } catch (Exception e) {
+            return new int[0];
+        }
+        int rows = 0;
+        for (int i = 0; i < text.length(); i++) {
+            if (text.charAt(i) == '\n') {
+                rows++;
+            }
+        }
+        int[] starts = new int[rows];
+        int at = 0;
+        for (int i = 0; i < text.length(); i++) {
+            if (text.charAt(i) == '\n') {
+                starts[at++] = offset + i + 1;
+            }
+        }
+        return starts;
+    }
+
+    /** Start offset of the row the given offset is in. */
+    private int rowStartAt(int offset) {
+        String text = textArea.getText();
+        int start = Math.min(offset, text.length());
+        while (start > 0 && text.charAt(start - 1) != '\n') {
+            start--;
+        }
+        return start;
+    }
+
+    /** Adds an offset to a sorted list of offsets. */
+    private static int[] insertOffset(int[] offsets, int offset) {
+        int[] grown = new int[offsets.length + 1];
+        int at = 0;
+        while (at < offsets.length && offsets[at] < offset) {
+            grown[at] = offsets[at];
+            at++;
+        }
+        grown[at] = offset;
+        System.arraycopy(offsets, at, grown, at + 1, offsets.length - at);
+        return grown;
+    }
+
+    /** Start offsets of the rows of {@code text}. */
+    private static int[] rowStarts(String text) {
+        int rows = 1;
+        for (int i = 0; i < text.length(); i++) {
+            if (text.charAt(i) == '\n') {
+                rows++;
+            }
+        }
+        int[] starts = new int[rows];
+        int row = 0;
+        starts[0] = 0;
+        for (int i = 0; i < text.length(); i++) {
+            if (text.charAt(i) == '\n') {
+                row++;
+                starts[row] = i + 1;
+            }
+        }
+        return starts;
+    }
+
+    /**
+     * Numbers the rows the gutter numbers and leaves the rest blank. The numbers are the ones of
+     * the message, so they follow the text while it is edited and do not change when the message
+     * is sent.
+     */
+    private void updateEditableNumbering() {
+        Gutter gutter = scrollPane.getGutter();
+        if (gutter == null) {
+            return;
+        }
+        int[] starts = rowStarts(textArea.getText());
+        int[] numbers = new int[starts.length];
+        int number = 0;
+        for (int i = 0; i < starts.length; i++) {
+            numbers[i] = isBlankRow(starts[i]) ? 0 : ++number;
+        }
+        try {
+            gutter.setLineNumberFormatter(new PrettifyLineNumberFormatter(numbers, number));
+        } catch (Exception ignored) {
+            // Gutter not available (e.g. line numbers disabled) - keep the default numbering.
+        }
+    }
+
+    /** Whether the row starting at {@code offset} is one the gutter leaves blank. */
+    private boolean isBlankRow(int offset) {
+        return java.util.Arrays.binarySearch(blankOffsets, offset) >= 0;
     }
 
     /**
@@ -227,6 +699,11 @@ public class PrettifyHttpPanelView
      * any soft-wrapped continuation rows) are left blank.
      */
     private void applyLineNumbering(DisplayTextSplitter.Split newSplit) {
+        if (editable) {
+            // The numbering follows the text the user is editing, not the message it came from.
+            updateEditableNumbering();
+            return;
+        }
         try {
             Gutter gutter = scrollPane.getGutter();
             if (gutter == null) {
@@ -268,22 +745,6 @@ public class PrettifyHttpPanelView
     }
 
     /**
-     * Width in pixels of the widest common character, using the same fractional metrics the text
-     * area paints with. The integral {@code FontMetrics.charWidth} rounds down (7 vs 7.22 for
-     * DejaVu Sans Mono), which would let a row overflow the viewport.
-     */
-    private double charAdvance() {
-        Font font = textArea.getFont();
-        if (font == null) {
-            return 0;
-        }
-        FontRenderContext frc = new FontRenderContext(null, true, true);
-        double widest = font.getStringBounds("M", frc).getWidth();
-        widest = Math.max(widest, font.getStringBounds("W", frc).getWidth());
-        return widest;
-    }
-
-    /**
      * Per-code-point rendered widths for the wrap. Characters the font does not have a monospaced
      * glyph for (binary bodies, control pictures, CJK fallback, ...) are wider than {@code 'M'}, so
      * wrapping by character count would overflow the viewport; the splitter wraps by these measured
@@ -291,10 +752,18 @@ public class PrettifyHttpPanelView
      */
     private DisplayTextSplitter.CharWidths charWidths() {
         final Font font = textArea.getFont();
+        // RSTA paints with fractional font metrics enabled (see PrettifyTextArea), so the advance
+        // per character is the fractional one, which can differ from the rounded FontMetrics
+        // charWidth() by a noticeable fraction. Measure with the same fractional context the
+        // painter uses, otherwise a row is broken a few characters before the right edge.
+        final FontMetrics metrics = textArea.getFontMetrics(font);
         final FontRenderContext frc = new FontRenderContext(null, true, true);
+        final double monospaceAdvance = monospaceAdvance(font, frc, metrics);
         // A tab advances to the next tab stop, i.e. at most TAB_SIZE columns; upper-bound it so a
         // tab can never make a row overflow.
-        final double tabWidth = charAdvance() * PrettifyTextArea.TAB_SIZE;
+        final double tabWidth =
+                (monospaceAdvance > 0 ? monospaceAdvance : metrics.charWidth(' '))
+                        * PrettifyTextArea.TAB_SIZE;
         return new DisplayTextSplitter.CharWidths() {
             private final double[] cache = new double[0x10000];
             private final java.util.HashMap<Integer, Double> wide =
@@ -308,14 +777,14 @@ public class PrettifyHttpPanelView
                 if (codePoint >= 0 && codePoint < 0x10000) {
                     double w = cache[codePoint];
                     if (w <= 0) {
-                        w = measure(codePoint, font, frc);
+                        w = measuredWidth(codePoint, font, frc, metrics, monospaceAdvance);
                         cache[codePoint] = w;
                     }
                     return w;
                 }
                 Double w = wide.get(codePoint);
                 if (w == null) {
-                    w = measure(codePoint, font, frc);
+                    w = measuredWidth(codePoint, font, frc, metrics, monospaceAdvance);
                     wide.put(codePoint, w);
                 }
                 return w;
@@ -323,21 +792,56 @@ public class PrettifyHttpPanelView
         };
     }
 
-    private static double measure(int codePoint, Font font, FontRenderContext frc) {
-        String s = new String(Character.toChars(codePoint));
-        return font.getStringBounds(s, frc).getWidth();
+    /**
+     * The font's exact per-character advance when it is monospaced, or -1 otherwise. RSTA rounds the
+     * width of a whole token run, so this (rather than the rounded {@code charWidth}) is the width a
+     * row really paints.
+     */
+    private static double monospaceAdvance(Font font, FontRenderContext frc, FontMetrics metrics) {
+        int charWidth = metrics.charWidth('M');
+        if (metrics.charWidth('i') != charWidth || metrics.charWidth('W') != charWidth) {
+            return -1;
+        }
+        return font.createGlyphVector(frc, "M").getGlyphPosition(1).getX();
+    }
+
+    private static double measuredWidth(
+            int codePoint, Font font, FontRenderContext frc, FontMetrics metrics,
+            double monospaceAdvance) {
+        if (monospaceAdvance > 0
+                && font.canDisplay(codePoint)
+                && Math.abs(metrics.charWidth(codePoint) - Math.round(monospaceAdvance)) <= 1) {
+            return monospaceAdvance;
+        }
+        return font.getStringBounds(new String(Character.toChars(codePoint)), frc).getWidth();
     }
 
     private void resplitIfWidthChanged() {
-        int widthPx = wrapMaxWidthPx();
+        if (editable || changed) {
+            // The user is editing: re-splitting would replace the text they are working on.
+            return;
+        }
+        int widthPx = currentWrapWidthPx();
         if (widthPx <= 0 || widthPx == wrappedWidthPx) {
             return;
         }
         if (resplitTimer == null) {
-            resplitTimer = new Timer(150, e -> update());
+            resplitTimer =
+                    new Timer(
+                            150,
+                            e -> {
+                                widthCorrections = 0;
+                                update(currentWrapWidthPx());
+                            });
             resplitTimer.setRepeats(false);
         }
         resplitTimer.restart();
+    }
+
+    /** Wrap width measured from the laid-out text area, falling back to the viewport. */
+    private int currentWrapWidthPx() {
+        int widthPx = drawableWidthPx();
+        return widthPx > 0 ? widthPx : wrapMaxWidthPx();
     }
 
     /** Syntax highlighting is always applied, based on the fixed style or the content type. */
@@ -445,7 +949,32 @@ public class PrettifyHttpPanelView
 
     @Override
     public void save() {
-        // Read-only view.
+        // What is shown is what is sent: the body stays formatted, as the view shows it.
+        String text = messageText();
+        try {
+            model.setData(text);
+        } catch (RuntimeException e) {
+            LOGGER.warn("Could not save the edited message.", e);
+            return;
+        }
+        changed = false;
+        rememberBody();
+        // The body is in the message now, so the request can be given the content type it has.
+        setContentTypeIfMissing();
+        // The message now holds the text the user typed, so the view is rendered again from it;
+        // that also rebuilds the wrap breaks, so a further edit is unwrapped correctly.
+        pendingCaretOffset = textArea.getCaretPosition();
+        update();
+    }
+
+    /** The edited text with the wrap breaks the split inserted taken out again. */
+    private String messageText() {
+        String edited = textArea.getText();
+        DisplayTextSplitter.Split activeSplit = split;
+        if (activeSplit == null) {
+            return edited;
+        }
+        return activeSplit.toMessageText(edited);
     }
 
     @Override
@@ -460,17 +989,39 @@ public class PrettifyHttpPanelView
 
     @Override
     public boolean hasChanged() {
-        return false;
+        // The view always shows the message in its formatted form, so saving it always writes that
+        // form back - the same as the core text view, which also always saves what it shows.
+        return true;
     }
 
     @Override
     public boolean isEditable() {
-        return false;
+        return editable;
     }
 
     @Override
     public void setEditable(boolean editable) {
-        // Read-only view.
+        if (this.editable == editable) {
+            return;
+        }
+        this.editable = editable;
+        textArea.setEditable(editable);
+        // The rows of a view that is only read are broken up to the width of the viewport; an
+        // editable view is wrapped by the text area, which re-wraps what the user types.
+        textArea.setLineWrap(editable);
+        if (!editable) {
+            // A view that cannot be edited must not carry changes into the message.
+            changed = false;
+        }
+        if (!changed && model.getMessage() != null) {
+            // The request may carry a body that says what it is; the header is filled in before
+            // the view is rendered, so that it is shown with the content type.
+            setContentTypeIfMissing();
+            // The document of an editable view is a plain one (the wrapped rows of a read-only
+            // document carry the tokens of the unwrapped text, which an edit would invalidate), so
+            // the view is rendered again to get the right kind of document.
+            update();
+        }
     }
 
     @Override
@@ -490,7 +1041,168 @@ public class PrettifyHttpPanelView
 
     @Override
     public void dataChanged(HttpPanelViewModelEvent e) {
+        undoZapBodyChange();
+        setContentTypeIfMissing();
         update();
+    }
+
+    /**
+     * Gives a request that carries a body the content type it has, when it does not have one: the
+     * type is taken from the body, so that a request sent with a JSON body says that it is JSON.
+     * Only a request that is being edited is touched.
+     */
+    private void setContentTypeIfMissing() {
+        if (!editable) {
+            return;
+        }
+        if (target != Target.REQUEST_BODY && target != Target.REQUEST_ALL) {
+            return;
+        }
+        Message message = model.getMessage();
+        if (!(message instanceof HttpMessage)) {
+            return;
+        }
+        HttpMessage httpMessage = (HttpMessage) message;
+        HttpRequestHeader header = httpMessage.getRequestHeader();
+        if (header == null) {
+            return;
+        }
+        if (!methodCarriesBody(header.getMethod())) {
+            return;
+        }
+        String body =
+                httpMessage.getRequestBody() == null
+                        ? ""
+                        : httpMessage.getRequestBody().toString();
+        if (body.trim().isEmpty()) {
+            return;
+        }
+        String contentType = ContentType.contentTypeFor(ContentType.sniff(body));
+        if (contentType == null) {
+            // The body does not say what it is, so nothing is guessed.
+            return;
+        }
+        String current = header.getHeader("Content-Type");
+        if (current == null) {
+            // The request does not say what it carries.
+            header.setHeader("Content-Type", contentType);
+            return;
+        }
+        if (contentType.equals(current)) {
+            return;
+        }
+        if (isFormContentType(current) && !isFormContentType(contentType)) {
+            // ZAP labels a request as a form when it moves the query string back into the body;
+            // the body says what it is, so the label is corrected.
+            header.setHeader("Content-Type", contentType);
+        }
+    }
+
+    /** Whether a content type names a form body. */
+    private static boolean isFormContentType(String contentType) {
+        return contentType != null
+                && contentType.toLowerCase(Locale.ROOT).contains("x-www-form-urlencoded");
+    }
+
+    /** Whether a request method normally carries a body. */
+    private static boolean methodCarriesBody(String method) {
+        if (method == null) {
+            return false;
+        }
+        switch (method.toUpperCase(Locale.ROOT)) {
+            case "POST":
+            case "PUT":
+            case "PATCH":
+            case "UPDATE":
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * Puts the request body back when ZAP changed it while the method was changed. The body is
+     * moved into the query string and back again, and a parameter without a value gains a "=" on
+     * the way back, so the body that comes back is not the body that was there.
+     */
+    private void undoZapBodyChange() {
+        if (!editable) {
+            return;
+        }
+        String data = model.getData();
+        String body = bodyOf(data);
+        String method = methodOf(data);
+        if (body != null && !body.isEmpty()) {
+            String remembered = lastShownBody;
+            boolean methodChanged = !method.equals(lastShownMethod);
+            if (!changed
+                    && !remembered.isEmpty()
+                    && !body.equals(remembered)
+                    && (methodChanged || body.equals(remembered + "="))) {
+                // ZAP moved the body into the query string and back again: the body it puts back is
+                // not the body that was there (it re-encodes a parameter without a value as
+                // "name=").
+                setBodyOf(data, remembered);
+            }
+            rememberBody();
+        }
+        // An empty body is not remembered: the body is empty while it is in the query string, and
+        // it is the body that was there before that has to be remembered.
+        lastShownMethod = method;
+    }
+
+    /** The request method of the message, or an empty string when it is not a request. */
+    private String methodOf(String data) {
+        if (target == Target.RESPONSE_BODY
+                || target == Target.RESPONSE_ALL
+                || target == Target.RESPONSE_HEAD) {
+            return "";
+        }
+        Message message = model.getMessage();
+        if (!(message instanceof HttpMessage)) {
+            return "";
+        }
+        HttpRequestHeader header = ((HttpMessage) message).getRequestHeader();
+        return header == null || header.getMethod() == null ? "" : header.getMethod();
+    }
+
+    /**
+     * Keeps track of the body the view shows. An empty body is not remembered: the body is empty
+     * while it is in the query string, and it is the body that was there before that has to be
+     * remembered.
+     */
+    private void rememberBody() {
+        String body = bodyOf(model.getData());
+        if (body == null || body.isEmpty()) {
+            return;
+        }
+        lastShownBody = body;
+    }
+
+    /** The request body of the message data, or null when this view does not show a body. */
+    private String bodyOf(String data) {
+        if (data == null) {
+            return null;
+        }
+        if (target == Target.REQUEST_BODY) {
+            return data;
+        }
+        if (target != Target.REQUEST_ALL) {
+            return null;
+        }
+        int split = data.indexOf("\n\n");
+        return split < 0 ? "" : data.substring(split + 2);
+    }
+
+    /** Writes the request body back into the message data. */
+    private void setBodyOf(String data, String body) {
+        if (target == Target.REQUEST_BODY) {
+            model.setData(body);
+            return;
+        }
+        int split = data == null ? -1 : data.indexOf("\n\n");
+        String header = split < 0 ? "" : data.substring(0, split);
+        model.setData(header + "\n\n" + body);
     }
 
     @Override

@@ -58,6 +58,15 @@ public final class PrettyPrint {
 
     /** Formats the body of a full message (status/request line + headers + body). */
     public static String formatMessage(String bodyStyleKey, String message) {
+        return formatMessage(bodyStyleKey, message, true);
+    }
+
+    /**
+     * Formats the body of a full message, optionally leaving the body as it is. The body is left
+     * alone when its formatting would change what it means, which is the case for a form body: the
+     * formatted form puts every parameter on its own line and drops the separators.
+     */
+    public static String formatMessage(String bodyStyleKey, String message, boolean reformat) {
         if (message == null || bodyStyleKey == null) {
             return message;
         }
@@ -67,7 +76,8 @@ public final class PrettyPrint {
             // followed by dangling empty lines.
             return stripTrailingNewlines(message);
         }
-        return message.substring(0, split) + formatBody(bodyStyleKey, message.substring(split));
+        String body = message.substring(split);
+        return message.substring(0, split) + (reformat ? formatBody(bodyStyleKey, body) : body);
     }
 
     /**
@@ -77,6 +87,11 @@ public final class PrettyPrint {
      * JavaScript.
      */
     public static String formatMessageFor(String contentType, String message) {
+        return formatMessageFor(contentType, message, true);
+    }
+
+    /** Formats a full message, optionally leaving the body as it is (see {@link #formatMessage}). */
+    public static String formatMessageFor(String contentType, String message, boolean reformat) {
         if (message == null) {
             return null;
         }
@@ -86,7 +101,7 @@ public final class PrettyPrint {
         }
         String body = message.substring(split);
         return message.substring(0, split)
-                + formatBody(ContentType.styleKeyFor(contentType, body), body);
+                + (reformat ? formatBody(ContentType.styleKeyFor(contentType, body), body) : body);
     }
 
     /**

@@ -209,8 +209,8 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
                     p++;
                     state = S_REQ_QUERY_NAME;
                 } else {
-                    state = consumeTrailingSpaces(p, end);
-                    p = end;
+                    p = consumeTrailingSpaces(p, end);
+                    state = S_REQ_VERSION;
                 }
             } else if (state == S_REQ_QUERY_VALUE) {
                 int s = p;
@@ -226,8 +226,10 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
                     p++;
                     state = S_REQ_QUERY_NAME;
                 } else {
-                    state = consumeTrailingSpaces(p, end);
-                    p = end;
+                    // The version follows the query: keep it, so that it is tokenized as part of
+                    // the request line instead of being swallowed as trailing whitespace.
+                    p = consumeTrailingSpaces(p, end);
+                    state = S_REQ_VERSION;
                 }
             } else {
                 break;
@@ -236,14 +238,17 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
         return state;
     }
 
-    /** Emits a whitespace run from {@code p} to {@code end} and returns {@link #S_REQ_VERSION}. */
+    /**
+     * Emits the whitespace run from {@code p} and returns the position after it, so that what
+     * follows (the HTTP version) is tokenized as part of the request line.
+     */
     private int consumeTrailingSpaces(int p, int end) {
         int ws = p;
         while (p < end && isSpace(arr[p])) {
             p++;
         }
         emit(ws, p - 1, TokenTypes.WHITESPACE);
-        return S_REQ_VERSION;
+        return p;
     }
 
     // -- Response status line -----------------------------------------------------------------

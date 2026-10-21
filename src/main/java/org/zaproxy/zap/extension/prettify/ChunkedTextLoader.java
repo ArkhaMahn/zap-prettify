@@ -3,6 +3,8 @@ package org.zaproxy.zap.extension.prettify;
 import java.util.function.BooleanSupplier;
 import javax.swing.text.BadLocationException;
 import javax.swing.text.JTextComponent;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.fife.ui.rsyntaxtextarea.RSyntaxDocument;
 import org.fife.ui.rsyntaxtextarea.TokenMakerFactory;
 
@@ -19,6 +21,8 @@ import org.fife.ui.rsyntaxtextarea.TokenMakerFactory;
  */
 public final class ChunkedTextLoader {
 
+    private static final Logger LOGGER = LogManager.getLogger(ChunkedTextLoader.class);
+
     /** Number of characters inserted and tokenised per slice. */
     private static final int SLICE_CHARS = 262144;
 
@@ -34,6 +38,23 @@ public final class ChunkedTextLoader {
             String styleKey,
             DisplayTextSplitter.Split split,
             BooleanSupplier cancelled) {
+        return buildDocument(text, styleKey, split, cancelled, false);
+    }
+
+    /**
+     * Builds a syntax document for {@code text} with {@code styleKey}, checking {@code cancelled}
+     * between slices. Returns {@code null} if the build was cancelled or failed; the caller must then
+     * leave the existing document in place.
+     *
+     * <p>An editable document is a plain one: the wrapped rows of a {@link PrettifyDocument} carry
+     * the tokens of the unwrapped text, which does not survive an edit made in the text area.
+     */
+    public static RSyntaxDocument buildDocument(
+            String text,
+            String styleKey,
+            DisplayTextSplitter.Split split,
+            BooleanSupplier cancelled,
+            boolean editable) {
         String source = text == null ? "" : text;
         String style = styleKey == null ? ContentType.PLAIN_STYLE : styleKey;
         PrettifyTokenMakerFactory baseFactory = new PrettifyTokenMakerFactory();
@@ -44,7 +65,14 @@ public final class ChunkedTextLoader {
                 PrettifyTokenMakerFactory.isHttpStyle(style)
                         ? baseFactory
                         : new ContinuedStringTokenMakerFactory(baseFactory);
-        PrettifyDocument document = new PrettifyDocument(factory, style, split);
+        // An editable document keeps the state-aware tokenization (an HTTP message is only
+        // highlighted correctly when the header and body states are carried from line to line), but
+        // not the replay of the recorded tokens: those describe the text as it was split and do not
+        // survive an edit.
+        RSyntaxDocument document =
+                editable
+                        ? new PrettifyDocument(factory, style, split, false)
+                        : new PrettifyDocument(factory, style, split);
         // Set the tab size on the document before it is displayed: RSyntaxDocument defaults it to 5,
         // and changing it after the document is installed forces a full re-layout of the (possibly
         // huge) document on the EDT.
@@ -60,15 +88,21 @@ public final class ChunkedTextLoader {
                         null);
             }
         } catch (RuntimeException | BadLocationException e) {
+            LOGGER.warn("Could not build the document.", e);
             return null;
         }
         if (cancelled != null && cancelled.getAsBoolean()) {
             return null;
         }
-        document.prepareScriptLines();
-        // Resolve the HTTP continuation-aware line states here, off the EDT, so painting never walks
-        // a large document.
-        document.precomputeLineStates();
+        if (document instanceof PrettifyDocument) {
+            PrettifyDocument prettifyDocument = (PrettifyDocument) document;
+            // From now on a change in the text area invalidates the recorded tokens.
+            prettifyDocument.watchForEdits();
+            prettifyDocument.prepareScriptLines();
+            // Resolve the HTTP continuation-aware line states here, off the EDT, so painting never
+            // walks a large document.
+            prettifyDocument.precomputeLineStates();
+        }
         return document;
     }
 
