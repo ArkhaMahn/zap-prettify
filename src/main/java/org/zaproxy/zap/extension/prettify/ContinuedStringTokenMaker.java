@@ -30,6 +30,9 @@ public class ContinuedStringTokenMaker implements TokenMaker {
 
     private final TokenMaker delegate;
 
+    /** State the last {@link #getTokenList} call leaves for the next line. */
+    private int lastState;
+
     public ContinuedStringTokenMaker(TokenMaker delegate) {
         this.delegate = delegate;
     }
@@ -37,9 +40,47 @@ public class ContinuedStringTokenMaker implements TokenMaker {
     @Override
     public Token getTokenList(Segment segment, int initialTokenType, int startOffset) {
         if (isMarker(initialTokenType)) {
+            lastState = getLastTokenTypeOnLine(segment, initialTokenType);
             return continueString(segment, initialTokenType, startOffset);
         }
-        return recolourOpenString(delegate.getTokenList(segment, initialTokenType, startOffset));
+        Token list = delegate.getTokenList(segment, initialTokenType, startOffset);
+        // Derive the carried state from the list just built instead of asking the delegate to
+        // tokenize the line a second time.
+        lastState = stateAfterLine(list, segment, initialTokenType);
+        return recolourOpenString(list);
+    }
+
+    /**
+     * State that the tokens returned by the last {@link #getTokenList} call carry to the next line.
+     * Only valid until the next call.
+     */
+    int lastState() {
+        return lastState;
+    }
+
+    /**
+     * Computes the carried state from an already built token list, avoiding a second tokenization
+     * pass. Mirrors {@link #lastType(Segment, int)} but reuses the delegate's tokens.
+     */
+    private int stateAfterLine(Token list, Segment segment, int initialTokenType) {
+        int lastType = initialTokenType;
+        Token open = null;
+        for (Token t = list; t != null; t = t.getNextToken()) {
+            lastType = t.getType();
+            if (!t.isPaintable()) {
+                continue;
+            }
+            int type = t.getType();
+            open = type == TokenTypes.ERROR_STRING_DOUBLE || type == TokenTypes.ERROR_CHAR ? t : null;
+        }
+        if (open == null) {
+            return lastType;
+        }
+        return marker(
+                quoteOfType(open.getType()),
+                open.getLanguageIndex(),
+                lastType,
+                endsWithOddBackslashes(segment));
     }
 
     @Override
