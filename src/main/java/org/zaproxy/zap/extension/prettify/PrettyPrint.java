@@ -195,6 +195,12 @@ public final class PrettyPrint {
     // CSS / JavaScript
     // ---------------------------------------------------------------------
 
+    /** Stack marker for a statement or function block, as opposed to an object literal. */
+    private static final char BLOCK_OPEN = '\u0007';
+
+    /** Stack marker for a destructuring pattern, which stays inline. */
+    private static final char PATTERN_OPEN = '\u0006';
+
     private static String braces(String s, boolean breakCommaInBraces, String styleKey) {
         Lexer lex = Lexer.of(styleKey, s);
         if (lex == null) {
@@ -259,15 +265,26 @@ public final class PrettyPrint {
                 case '{':
                 case '(':
                 case '[':
+                    char open = c;
+                    if (c == '{') {
+                        if (startsPattern(out)) {
+                            open = PATTERN_OPEN;
+                        } else if (startsBlock(out, last, stack)) {
+                            open = BLOCK_OPEN;
+                        }
+                    }
                     spaceBefore(out, pendingSpace, atLineStart, last);
                     out.append(c);
-                    stack.push(c);
+                    stack.push(open);
                     atLineStart = false;
                     pendingSpace = false;
                     last = c;
                     if (c == '{') {
                         int j = nextNonWs(s, i + 1);
-                        if (j < n && s.charAt(j) == '}') {
+                        if (open == PATTERN_OPEN) {
+                            // Destructuring patterns stay on one line.
+                            atLineStart = false;
+                        } else if (j < n && s.charAt(j) == '}') {
                             // Keep an empty object on one line.
                             atLineStart = false;
                         } else {
@@ -281,11 +298,13 @@ public final class PrettyPrint {
                 case '}':
                 case ')':
                 case ']':
+                    boolean patternClose = c == '}' && !stack.isEmpty()
+                            && stack.peek() == PATTERN_OPEN;
                     if (!stack.isEmpty()) {
                         stack.pop();
                     }
                     if (c == '}') {
-                        if (last != '{') {
+                        if (!patternClose && last != '{') {
                             indent = Math.max(0, indent - 1);
                             line(out, indent);
                         }
@@ -295,7 +314,14 @@ public final class PrettyPrint {
                         last = '}';
                         int j = nextNonWs(s, i + 1);
                         char next = (j < n) ? s.charAt(j) : 0;
-                        if (next != ';' && next != ',' && next != ')' && next != ']') {
+                        if (next == '.' || next == '(' || next == '[') {
+                            // The block is an expression operand; keep the call or index attached.
+                            atLineStart = false;
+                            pendingSpace = false;
+                        } else if (continuesExpression(next)) {
+                            atLineStart = false;
+                            pendingSpace = next != '=';
+                        } else if (next != ';' && next != ',' && next != ')' && next != ']') {
                             if (breakCommaInBraces
                                     && nextWordIs(s, i + 1, "else", "catch", "finally", "while")) {
                                 // Keep the clause attached to the block it belongs to.
@@ -390,17 +416,13 @@ public final class PrettyPrint {
                 && (end == s.length() || !isWordChar(s.charAt(end)));
     }
 
-    private static boolean isWordChar(char c) {
-        return Character.isLetterOrDigit(c) || c == '_' || c == '$';
-    }
-
     /**
      * Whether the innermost open construct is a parenthesis (a {@code for} header, for example)
      * rather than a block, so a {@code const} there must stay inline.
      */
     private static boolean insideParentheses(Deque<Character> stack) {
         for (Character open : stack) {
-            if (open == '{') {
+            if (open == '{' || open == BLOCK_OPEN) {
                 return false;
             }
             if (open == '(') {
@@ -408,6 +430,105 @@ public final class PrettyPrint {
             }
         }
         return false;
+    }
+
+    /** Whether a brace starts a destructuring pattern, which should stay on one line. */
+    private static boolean startsPattern(StringBuilder out) {
+        return endsWithWord(out, "var")
+                || endsWithWord(out, "let")
+                || endsWithWord(out, "const");
+    }
+
+    /** Whether the current statement is a bare identifier, i.e. a statement label. */
+    private static boolean inLabel(StringBuilder out) {
+        String statement = currentStatement(out);
+        if (statement.endsWith(":")) {
+            statement = statement.substring(0, statement.length() - 1).trim();
+        }
+        if (statement.isEmpty() || !isWordChar(statement.charAt(0))) {
+            return false;
+        }
+        for (int i = 1; i < statement.length(); i++) {
+            if (!isWordChar(statement.charAt(i))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Whether the current statement is a {@code case}/{@code default} label. */
+    private static boolean inCaseLabel(StringBuilder out) {
+        String statement = currentStatement(out);
+        return statement.startsWith("case") || statement.startsWith("default");
+    }
+
+    private static String currentStatement(StringBuilder out) {
+        int i = out.length() - 1;
+        while (i >= 0) {
+            char c = out.charAt(i);
+            if (c == ';' || c == '{' || c == '}') {
+                break;
+            }
+            i--;
+        }
+        return out.substring(i + 1).trim();
+    }
+
+    /** Whether {@code c} continues the expression a closing brace belongs to. */
+    private static boolean continuesExpression(char c) {
+        return c == '=' || c == '+' || c == '-' || c == '*' || c == '/' || c == '%'
+                || c == '&' || c == '|' || c == '^' || c == '<' || c == '>' || c == '!'
+                || c == '?' || c == ':' || c == '~';
+    }
+
+    /**
+     * Whether a {@code '{'} opens a statement/function block rather than an object literal, based on
+     * the token before it. Object literals follow operators, {@code return} and similar keywords;
+     * blocks follow {@code ')'}, statements, {@code else}/{@code do} and declaration names.
+     */
+    private static boolean startsBlock(StringBuilder out, char last, Deque<Character> stack) {
+        if (last == '\0' || last == ')' || last == ';' || last == '}') {
+            return true;
+        }
+        if (last == ':') {
+            // Only a case/default label introduces a block; an object value stays an object.
+            Character top = stack.peek();
+            return (top == null || (top != '{' && top != PATTERN_OPEN))
+                    && (inCaseLabel(out) || inLabel(out));
+        }
+        if (last == '>') {
+            int length = out.length();
+            return length >= 2 && out.charAt(length - 2) == '=';
+        }
+        if (endsWithWord(out, "else")
+                || endsWithWord(out, "try")
+                || endsWithWord(out, "finally")
+                || endsWithWord(out, "do")) {
+            return true;
+        }
+        if (isWordChar(last)) {
+            // A brace directly after an identifier starts a class/namespace body; after these
+            // keywords it introduces an object expression.
+            return !(endsWithWord(out, "return")
+                    || endsWithWord(out, "yield")
+                    || endsWithWord(out, "await")
+                    || endsWithWord(out, "case")
+                    || endsWithWord(out, "var")
+                    || endsWithWord(out, "let")
+                    || endsWithWord(out, "const")
+                    || endsWithWord(out, "in")
+                    || endsWithWord(out, "of")
+                    || endsWithWord(out, "delete")
+                    || endsWithWord(out, "void")
+                    || endsWithWord(out, "typeof")
+                    || endsWithWord(out, "new")
+                    || endsWithWord(out, "throw"));
+        }
+        return false;
+    }
+
+    private static boolean isWordChar(char c) {
+        return Character.isLetterOrDigit(c) || c == '_' || c == '$';
     }
 
     /** Whether the formatted output ends with {@code word} as a whole word. */
