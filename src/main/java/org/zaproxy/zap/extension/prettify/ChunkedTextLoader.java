@@ -65,6 +65,7 @@ public final class ChunkedTextLoader {
         if (cancelled != null && cancelled.getAsBoolean()) {
             return null;
         }
+        document.prepareScriptLines();
         // Resolve the HTTP continuation-aware line states here, off the EDT, so painting never walks
         // a large document.
         document.precomputeLineStates();

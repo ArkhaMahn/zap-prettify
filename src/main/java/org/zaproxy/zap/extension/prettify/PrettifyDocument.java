@@ -34,11 +34,13 @@ public class PrettifyDocument extends RSyntaxDocument {
     private final SplitTokenMaker tokenMaker;
 
     private final boolean http;
+    private final boolean scanScripts;
     private final int[] continuationStarts;
     private final TokenMaker stateTokenMaker;
     private final TokenMaker fallbackTokenMaker;
     private final Segment segment = new Segment();
 
+    private int[] scriptRanges;
     private int[] lineState;
     private int computedUpTo = -1;
 
@@ -56,6 +58,10 @@ public class PrettifyDocument extends RSyntaxDocument {
         this.tokenMaker = new SplitTokenMaker(tokenStarts, tokenEnds, tokenTypes);
 
         this.http = PrettifyTokenMakerFactory.isHttpStyle(styleKey);
+        // The All-message views wrap the body in an HTTP token maker, so HTML there is not a
+        // distinct style key; script bodies only appear in messages whose body carries markup, and
+        // prepareScriptLines() finds nothing to recolor otherwise.
+        this.scanScripts = http || ContentType.isHtmlStyle(styleKey);
         this.stateTokenMaker = http ? tokenMakerFactory.getTokenMaker(styleKey) : null;
         // Lines the splitter left spanless are tokenized lazily with this maker, starting at state
         // zero (the splitter only skips lines that cannot carry state).
@@ -78,6 +84,14 @@ public class PrettifyDocument extends RSyntaxDocument {
 
     @Override
     public Token getTokenListForLine(int line) {
+        Token list = tokenListForLine(line);
+        if (list != null && scanScripts && scriptRanges != null && scriptRanges.length != 0) {
+            ScriptTokenHighlighter.recolor(list, scriptRanges);
+        }
+        return list;
+    }
+
+    private Token tokenListForLine(int line) {
         if (tokenStarts.length != 0 && lineHasSpans(line)) {
             return replayTokenList(line);
         }
@@ -139,6 +153,79 @@ public class PrettifyDocument extends RSyntaxDocument {
     public void precomputeLineStates() {
         if (tokenStarts.length == 0 && http) {
             advanceTo(lineCount() - 1);
+        }
+    }
+
+    /**
+     * Records the character ranges of the {@code <script>} bodies, so their object literal keys can
+     * be recoloured when a line containing them is tokenized. Called once, off the Event Dispatch
+     * Thread, after the text has been inserted.
+     */
+    public void prepareScriptLines() {
+        if (!scanScripts || (http && !looksLikeHtmlBody())) {
+            return;
+        }
+        String text;
+        try {
+            text = getText(0, getLength());
+        } catch (BadLocationException e) {
+            return;
+        }
+        String lower = text.toLowerCase(java.util.Locale.ROOT);
+        java.util.List<Integer> ranges = new java.util.ArrayList<>();
+        int from = 0;
+        while (from < lower.length()) {
+            int open = lower.indexOf("<script", from);
+            if (open < 0) {
+                break;
+            }
+            int commentOpen = lower.lastIndexOf("<!--", open);
+            int commentClose = lower.lastIndexOf("-->", open);
+            if (commentOpen > commentClose) {
+                from = open + 7;
+                continue;
+            }
+            int close = lower.indexOf("</script", open);
+            int end = close < 0 ? text.length() : Math.min(text.length(), close + 8);
+            ranges.add(open);
+            ranges.add(end);
+            from = end;
+        }
+        int[] result = new int[ranges.size()];
+        for (int i = 0; i < result.length; i++) {
+            result[i] = ranges.get(i);
+        }
+        scriptRanges = result;
+    }
+
+
+    /**
+     * Whether the HTTP message's header block declares an HTML body. Keeps the script scan (which
+     * reads the whole document) away from large binary payloads.
+     */
+    private boolean looksLikeHtmlBody() {
+        try {
+            String head = getText(0, Math.min(getLength(), 8192)).toLowerCase(java.util.Locale.ROOT);
+            int separator = head.indexOf("\r\n\r\n");
+            if (separator < 0) {
+                separator = head.indexOf("\n\n");
+            }
+            if (separator < 0) {
+                return false;
+            }
+            String headers = head.substring(0, separator);
+            int at = headers.indexOf("content-type:");
+            if (at < 0) {
+                return false;
+            }
+            String value = headers.substring(at + "content-type:".length());
+            int eol = value.indexOf('\n');
+            if (eol >= 0) {
+                value = value.substring(0, eol);
+            }
+            return value.contains("html");
+        } catch (BadLocationException | RuntimeException e) {
+            return false;
         }
     }
 

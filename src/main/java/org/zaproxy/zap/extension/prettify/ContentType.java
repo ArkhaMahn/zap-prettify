@@ -281,6 +281,11 @@ public final class ContentType {
                 || subtype.endsWith("+js");
     }
 
+    /** Whether a style key selects the HTML/XML markup token maker. */
+    public static boolean isHtmlStyle(String styleKey) {
+        return HTML.equals(styleKey);
+    }
+
     /** Whether a style key selects the JavaScript token maker. */
     public static boolean isJavaScriptStyle(String styleKey) {
         return JAVASCRIPT.equals(styleKey);
