@@ -26,7 +26,7 @@ public final class BurpTheme {
             /* datatype              */ "#000075",
             /* tagName               */ "#B000C0",
             /* cdata                 */ "#CC6600",
-            /* lineNumbers           */ "#787878",
+            /* lineNumbers           */ "#A0A0A0",
             /* selectionBackground   */ "#CADAF0",
             /* selectionForeground   */ "#FFFFFF");
 
@@ -48,7 +48,7 @@ public final class BurpTheme {
             /* datatype              */ "#FF9E57",
             /* tagName               */ "#E9C063",
             /* cdata                 */ "#D5E6F0",
-            /* lineNumbers           */ "#A0A0A0",
+            /* lineNumbers           */ "#707070",
             /* selectionBackground   */ "#2C5175",
             /* selectionForeground   */ "#FFFFFF");
 

@@ -78,9 +78,6 @@ public class PrettifyHttpPanelView
     /** Debounces re-splitting while the panel is being resized. */
     private Timer resplitTimer;
 
-    /** Extra characters allowed beyond the strict wrap fit. */
-    private static final int EXTRA_WRAP_CHARS = 1;
-
     private String configurationKey = "";
 
     public PrettifyHttpPanelView(
@@ -98,6 +95,7 @@ public class PrettifyHttpPanelView
         this.mainPanel = new JPanel(new BorderLayout());
         this.textArea = new PrettifyTextArea(DisplayUtils.isDarkLookAndFeel());
         this.scrollPane = new RTextScrollPane(textArea, true);
+        applyGutterTheme();
         // The text is pre-wrapped to fit the viewport, so a horizontal scrollbar could never reveal
         // anything: its thumb would always span the full track. Disable it so the wrap appears
         // contained instead of showing a redundant bar.
@@ -130,6 +128,17 @@ public class PrettifyHttpPanelView
 
         this.model.addHttpPanelViewModelListener(this);
         update();
+    }
+
+    /** Dims the gutter so the line numbers and their separator do not compete with the message. */
+    private void applyGutterTheme() {
+        Gutter gutter = scrollPane.getGutter();
+        if (gutter == null) {
+            return;
+        }
+        BurpTheme theme = textArea.isDark() ? BurpTheme.DARK : BurpTheme.LIGHT;
+        gutter.setLineNumberColor(theme.getLineNumbers());
+        gutter.setBorderColor(theme.getLineNumbers());
     }
 
     private void update() {
@@ -231,16 +240,9 @@ public class PrettifyHttpPanelView
         }
     }
 
-    /**
-     * Wrap width in pixels, {@value #EXTRA_WRAP_CHARS} characters wider than what fits so the last
-     * character is not flush against the edge.
-     */
+    /** Width in pixels that a wrapped row may use, or 0 if the width is not known yet. */
     private int wrapMaxWidthPx() {
-        int width = wrapWidthPx();
-        if (width <= 0) {
-            return 0;
-        }
-        return width + EXTRA_WRAP_CHARS * (int) Math.ceil(charAdvance());
+        return wrapWidthPx();
     }
 
     /** Width, in pixels, that a wrapped row may use, or 0 if the width is not known yet. */
