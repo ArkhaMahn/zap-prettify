@@ -286,6 +286,11 @@ public final class ContentType {
         return HTML.equals(styleKey);
     }
 
+    /** Whether a style key selects a whole-document script token maker. */
+    public static boolean isScriptStyle(String styleKey) {
+        return JAVASCRIPT.equals(styleKey) || TYPESCRIPT.equals(styleKey);
+    }
+
     /** Whether a style key selects the JavaScript token maker. */
     public static boolean isJavaScriptStyle(String styleKey) {
         return JAVASCRIPT.equals(styleKey);

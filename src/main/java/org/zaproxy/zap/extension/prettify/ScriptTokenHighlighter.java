@@ -11,9 +11,9 @@ import org.fife.ui.rsyntaxtextarea.TokenTypes;
  * <p>RSTA's HTML token maker lexes script bodies with its own JavaScript rules, so quoted keys are
  * painted with the same string colour as values. The formatted output puts each property on its own
  * line, which makes key detection cheap: a quoted (or unquoted, after {@code '{'} / {@code ','})
- * token followed by {@code ':'} is a key and is retyped to {@link TokenTypes#VARIABLE}, the type
- * RSTA's JSON maker uses for keys. A name followed by {@code '('} in the same position is a method
- * shorthand and becomes {@link TokenTypes#FUNCTION}.
+ * token followed by {@code ':'} is a key and is retyped to {@link TokenTypes#VARIABLE}, the same
+ * type RSTA's JSON maker uses for keys. A name followed by {@code '('} in the same position is a
+ * method shorthand and becomes {@link TokenTypes#FUNCTION}.
  */
 final class ScriptTokenHighlighter {
 
@@ -22,8 +22,12 @@ final class ScriptTokenHighlighter {
     /**
      * Retypes the object literal keys in one already tokenized display line. Only tokens that start
      * inside one of {@code ranges} (pairs of script-body start/end offsets) are touched. Idempotent.
+     *
+     * <p>A line that starts at a wrap break cannot start with a key: the break fell inside an
+     * expression, so a name followed by {@code ':'} there is a ternary or label branch, not a
+     * property ({@code cond?global:other} wrapped after {@code global?}).
      */
-    static void recolor(Token list, int[] ranges) {
+    static void recolor(Token list, int[] ranges, boolean continuationLine) {
         List<Token> tokens = new ArrayList<>();
         for (Token t = list; t != null; t = t.getNextToken()) {
             if (t.getNextToken() == null || t.length() <= 0 || isInvisible(t.getType())) {
@@ -32,7 +36,7 @@ final class ScriptTokenHighlighter {
             tokens.add(t);
         }
         String previous = null;
-        boolean keyPosition = true;
+        boolean keyPosition = !continuationLine;
         for (int i = 0; i < tokens.size(); i++) {
             Token t = tokens.get(i);
             String lexeme = t.getLexeme();
@@ -41,7 +45,7 @@ final class ScriptTokenHighlighter {
                     type == TokenTypes.LITERAL_STRING_DOUBLE_QUOTE
                             || type == TokenTypes.LITERAL_CHAR;
             boolean unquoted =
-                    type == TokenTypes.IDENTIFIER
+                    (type == TokenTypes.IDENTIFIER || type == TokenTypes.VARIABLE)
                             && ("{".equals(previous)
                                     || ",".equals(previous)
                                     || (keyPosition && previous == null));
