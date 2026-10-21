@@ -78,6 +78,9 @@ public class PrettifyHttpPanelView
     /** Debounces re-splitting while the panel is being resized. */
     private Timer resplitTimer;
 
+    /** Extra characters allowed beyond the strict wrap fit. */
+    private static final int EXTRA_WRAP_CHARS = 1;
+
     private String configurationKey = "";
 
     public PrettifyHttpPanelView(
@@ -165,7 +168,7 @@ public class PrettifyHttpPanelView
         switch (target) {
             case REQUEST_ALL:
             case RESPONSE_ALL:
-                return PrettyPrint.formatMessage(ContentType.styleKeyFor(contentType), text);
+                return PrettyPrint.formatMessageFor(contentType, text);
             case REQUEST_BODY:
             case RESPONSE_BODY:
                 return PrettyPrint.formatBody(ContentType.styleKeyFor(contentType, text), text);
@@ -228,9 +231,16 @@ public class PrettifyHttpPanelView
         }
     }
 
-    /** Wrap width in pixels: exactly the width that fits the viewport. */
+    /**
+     * Wrap width in pixels, {@value #EXTRA_WRAP_CHARS} characters wider than what fits so the last
+     * character is not flush against the edge.
+     */
     private int wrapMaxWidthPx() {
-        return wrapWidthPx();
+        int width = wrapWidthPx();
+        if (width <= 0) {
+            return 0;
+        }
+        return width + EXTRA_WRAP_CHARS * (int) Math.ceil(charAdvance());
     }
 
     /** Width, in pixels, that a wrapped row may use, or 0 if the width is not known yet. */

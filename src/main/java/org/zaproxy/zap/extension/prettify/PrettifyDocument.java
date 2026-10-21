@@ -34,10 +34,13 @@ public class PrettifyDocument extends RSyntaxDocument {
     private final SplitTokenMaker tokenMaker;
 
     private final boolean http;
+    private final boolean scanScripts;
     private final int[] continuationStarts;
     private final TokenMaker stateTokenMaker;
+    private final TokenMaker fallbackTokenMaker;
     private final Segment segment = new Segment();
 
+    private int[] scriptRanges;
     private int[] lineState;
     private int computedUpTo = -1;
 
@@ -55,7 +58,14 @@ public class PrettifyDocument extends RSyntaxDocument {
         this.tokenMaker = new SplitTokenMaker(tokenStarts, tokenEnds, tokenTypes);
 
         this.http = PrettifyTokenMakerFactory.isHttpStyle(styleKey);
+        // The All-message views wrap the body in an HTTP token maker, so HTML there is not a
+        // distinct style key; script bodies only appear in messages whose body carries markup, and
+        // prepareScriptLines() finds nothing to recolor otherwise.
+        this.scanScripts = http || ContentType.isHtmlStyle(styleKey);
         this.stateTokenMaker = http ? tokenMakerFactory.getTokenMaker(styleKey) : null;
+        // Lines the splitter left spanless are tokenized lazily with this maker, starting at state
+        // zero (the splitter only skips lines that cannot carry state).
+        this.fallbackTokenMaker = tokenMakerFactory.getTokenMaker(styleKey);
         this.continuationStarts = continuationStarts(split);
         this.lineState = new int[Math.max(16, lineCount())];
     }
@@ -74,10 +84,21 @@ public class PrettifyDocument extends RSyntaxDocument {
 
     @Override
     public Token getTokenListForLine(int line) {
-        if (tokenStarts.length != 0) {
+        Token list = tokenListForLine(line);
+        if (list != null && scanScripts && scriptRanges != null && scriptRanges.length != 0) {
+            ScriptTokenHighlighter.recolor(list, scriptRanges);
+        }
+        return list;
+    }
+
+    private Token tokenListForLine(int line) {
+        if (tokenStarts.length != 0 && lineHasSpans(line)) {
             return replayTokenList(line);
         }
         if (!http) {
+            if (tokenStarts.length != 0) {
+                return fallbackTokenList(line);
+            }
             return super.getTokenListForLine(line);
         }
         if (line == cachedTokenLine && cachedTokenList != null) {
@@ -108,10 +129,13 @@ public class PrettifyDocument extends RSyntaxDocument {
 
     @Override
     public int getLastTokenTypeOnLine(int line) {
-        if (tokenStarts.length != 0) {
+        if (tokenStarts.length != 0 && lineHasSpans(line)) {
             return replayLastTokenType(line);
         }
         if (!http) {
+            if (tokenStarts.length != 0) {
+                return fallbackLastType(line);
+            }
             return super.getLastTokenTypeOnLine(line);
         }
         if (line < 0) {
@@ -132,7 +156,113 @@ public class PrettifyDocument extends RSyntaxDocument {
         }
     }
 
+    /**
+     * Records the character ranges of the {@code <script>} bodies, so their object literal keys can
+     * be recoloured when a line containing them is tokenized. Called once, off the Event Dispatch
+     * Thread, after the text has been inserted.
+     */
+    public void prepareScriptLines() {
+        if (!scanScripts || (http && !looksLikeHtmlBody())) {
+            return;
+        }
+        String text;
+        try {
+            text = getText(0, getLength());
+        } catch (BadLocationException e) {
+            return;
+        }
+        String lower = text.toLowerCase(java.util.Locale.ROOT);
+        java.util.List<Integer> ranges = new java.util.ArrayList<>();
+        int from = 0;
+        while (from < lower.length()) {
+            int open = lower.indexOf("<script", from);
+            if (open < 0) {
+                break;
+            }
+            int commentOpen = lower.lastIndexOf("<!--", open);
+            int commentClose = lower.lastIndexOf("-->", open);
+            if (commentOpen > commentClose) {
+                from = open + 7;
+                continue;
+            }
+            int close = lower.indexOf("</script", open);
+            int end = close < 0 ? text.length() : Math.min(text.length(), close + 8);
+            ranges.add(open);
+            ranges.add(end);
+            from = end;
+        }
+        int[] result = new int[ranges.size()];
+        for (int i = 0; i < result.length; i++) {
+            result[i] = ranges.get(i);
+        }
+        scriptRanges = result;
+    }
+
+
+    /**
+     * Whether the HTTP message's header block declares an HTML body. Keeps the script scan (which
+     * reads the whole document) away from large binary payloads.
+     */
+    private boolean looksLikeHtmlBody() {
+        try {
+            String head = getText(0, Math.min(getLength(), 8192)).toLowerCase(java.util.Locale.ROOT);
+            int separator = head.indexOf("\r\n\r\n");
+            if (separator < 0) {
+                separator = head.indexOf("\n\n");
+            }
+            if (separator < 0) {
+                return false;
+            }
+            String headers = head.substring(0, separator);
+            int at = headers.indexOf("content-type:");
+            if (at < 0) {
+                return false;
+            }
+            String value = headers.substring(at + "content-type:".length());
+            int eol = value.indexOf('\n');
+            if (eol >= 0) {
+                value = value.substring(0, eol);
+            }
+            return value.contains("html");
+        } catch (BadLocationException | RuntimeException e) {
+            return false;
+        }
+    }
+
     // -- Replayed spans -----------------------------------------------------------------------
+
+    /** Whether the display line has recorded spans, and so can be replayed instead of tokenized. */
+    private boolean lineHasSpans(int line) {
+        Element root = getDefaultRootElement();
+        if (line < 0 || line >= root.getElementCount()) {
+            return false;
+        }
+        Element lineElement = root.getElement(line);
+        int start = lineElement.getStartOffset();
+        int end = Math.max(start, lineElement.getEndOffset() - 1);
+        if (end <= start) {
+            return false;
+        }
+        int i = firstSpanAtOrAfter(start);
+        return i < tokenStarts.length && tokenStarts[i] < end;
+    }
+
+    /** First span whose start is at or after {@code offset}. */
+    private int firstSpanAtOrAfter(int offset) {
+        int lo = 0;
+        int hi = tokenStarts.length - 1;
+        int answer = tokenStarts.length;
+        while (lo <= hi) {
+            int mid = (lo + hi) >>> 1;
+            if (tokenStarts[mid] >= offset) {
+                answer = mid;
+                hi = mid - 1;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        return answer;
+    }
 
     private Token replayTokenList(int line) {
         if (line == cachedTokenLine && cachedTokenList != null) {
@@ -193,6 +323,48 @@ public class PrettifyDocument extends RSyntaxDocument {
             return candidate;
         }
         return -1;
+    }
+
+    /**
+     * Tokenizes a line the splitter left spanless, starting from state zero. Such a line cannot
+     * carry state in or out, so it is independent of the replayed rows around it.
+     */
+    private Token fallbackTokenList(int line) {
+        Element root = getDefaultRootElement();
+        if (line < 0 || line >= root.getElementCount() || fallbackTokenMaker == null) {
+            return super.getTokenListForLine(line);
+        }
+        Element lineElement = root.getElement(line);
+        int start = lineElement.getStartOffset();
+        int length = lineElement.getEndOffset() - 1 - start;
+        if (length < 0) {
+            length = 0;
+        }
+        try {
+            getText(start, length, segment);
+        } catch (BadLocationException e) {
+            return super.getTokenListForLine(line);
+        }
+        return fallbackTokenMaker.getTokenList(segment, 0, start);
+    }
+
+    private int fallbackLastType(int line) {
+        Element root = getDefaultRootElement();
+        if (line < 0 || line >= root.getElementCount() || fallbackTokenMaker == null) {
+            return 0;
+        }
+        Element lineElement = root.getElement(line);
+        int start = lineElement.getStartOffset();
+        int length = lineElement.getEndOffset() - 1 - start;
+        if (length < 0) {
+            return 0;
+        }
+        try {
+            getText(start, length, segment);
+        } catch (BadLocationException e) {
+            return 0;
+        }
+        return fallbackTokenMaker.getLastTokenTypeOnLine(segment, 0);
     }
 
     // -- HTTP carried state (no replayed spans) -----------------------------------------------

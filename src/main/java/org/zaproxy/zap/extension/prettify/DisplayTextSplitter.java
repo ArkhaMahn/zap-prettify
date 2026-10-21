@@ -2,7 +2,10 @@ package org.zaproxy.zap.extension.prettify;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import javax.swing.text.Segment;
 import org.fife.ui.rsyntaxtextarea.Token;
 import org.fife.ui.rsyntaxtextarea.TokenMaker;
@@ -34,6 +37,19 @@ public final class DisplayTextSplitter {
     private static final int NONE = 0;
     private static final int LINE_COMMENT = 1;
     private static final int BLOCK_COMMENT = 2;
+
+    /** Minimum line length worth caching; shorter lines tokenize faster than a cache lookup. */
+    private static final int MIN_CACHED_LINE = 64;
+
+    /** Approximate limit, in retained characters, of the per-line token cache. */
+    private static final long LINE_CACHE_BUDGET = 16L * 1024 * 1024;
+
+    /**
+     * Tokenized lines, shared by every split. The same message is split once per view (headers,
+     * body, whole message), so the expensive bodies are tokenized once and reused instead of once
+     * per view.
+     */
+    private static final LineCache LINE_CACHE = new LineCache(LINE_CACHE_BUDGET);
 
     private DisplayTextSplitter() {}
 
@@ -90,7 +106,10 @@ public final class DisplayTextSplitter {
         }
         // Tokenizing is only needed when something actually wraps; typical messages never reach the
         // width limit, so skip it entirely then.
-        TokenInfo info = needsWrap(string, maxWidth, widths) ? tokenInfo(string, style) : null;
+        TokenInfo info =
+                needsWrap(string, maxWidth, widths)
+                        ? tokenInfo(string, style, maxWidth, widths)
+                        : null;
         List<Integer> breakOffsets = new ArrayList<>();
         List<Integer> breakIndents = new ArrayList<>();
         List<Integer> tokenStarts = new ArrayList<>();
@@ -241,6 +260,18 @@ public final class DisplayTextSplitter {
             return;
         }
         int n = info.tokenType.length;
+        // A row whose line was not tokenized has no recorded types; leave it spanless so the
+        // document tokenizes it lazily.
+        boolean any = false;
+        for (int k = rowStart; k < rowEnd; k++) {
+            if (k < n && info.tokenType[k] != 0) {
+                any = true;
+                break;
+            }
+        }
+        if (!any) {
+            return;
+        }
         int pos = rowStart;
         while (pos < rowEnd) {
             int type = pos < n ? (info.tokenType[pos] & 0xFF) : 0;
@@ -258,6 +289,45 @@ public final class DisplayTextSplitter {
             tokenTypes.add(type);
             pos = fragmentEnd;
         }
+    }
+
+    /** Whether the line {@code [start, end)} is wider than {@code maxWidth}. */
+    private static boolean lineWraps(
+            String string, int start, int end, int maxWidth, CharWidths widths) {
+        double w = 0;
+        int i = start;
+        while (i < end) {
+            int cp = string.codePointAt(i);
+            w += widths.widthOf(cp);
+            if (w > maxWidth) {
+                return true;
+            }
+            i += Character.charCount(cp);
+        }
+        return false;
+    }
+
+    /**
+     * Conservative check for text that could leave the tokenizer in a carried state (a comment,
+     * string, HTML/JS/CSS opener, or a line continuation). Skipped lines are assumed to end in the
+     * state they started in - zero - so anything that might not is tokenized instead.
+     */
+    private static boolean mayCarryState(String string, int start, int end) {
+        for (int i = start; i < end; i++) {
+            switch (string.charAt(i)) {
+                case '"':
+                case '\'':
+                case '`':
+                case '\\':
+                case '/':
+                case '*':
+                case '<':
+                    return true;
+                default:
+                    break;
+            }
+        }
+        return false;
     }
 
     /** Whether any logical line is wider than {@code maxWidth} and therefore needs wrapping. */
@@ -283,14 +353,19 @@ public final class DisplayTextSplitter {
     }
 
     /**
-     * Tokenizes {@code text} with the same token maker the view uses for {@code style} (including
-     * the HTTP message token maker, whose body delegate is chosen from the {@code Content-Type}
-     * header) and records, for every character, which token covers it and where that token ends.
-     * This yields both the token boundaries a wrap break may safely land on and the original token
-     * types a cut token must keep. Returns null when no token maker is available or tokenization
-     * fails, in which case breaks sit at the exact width.
+     * Tokenizes the lines of {@code text} with the same token maker the view uses for {@code style}
+     * (including the HTTP message token maker, whose body delegate is chosen from the {@code
+     * Content-Type} header) and records, for every character of a tokenized line, which token covers
+     * it and where that token ends. This yields the token types a cut token must keep.
+     *
+     * <p>Only lines that need it are tokenized: a line is tokenized when it wraps, when it starts
+     * inside a carried construct (state != 0), or when it could open one. Lines that cannot change
+     * the carried state are skipped and left with no recorded tokens, so {@link PrettifyDocument}
+     * tokenizes them lazily instead of paying for them up front. Returns null when no token maker is
+     * available or tokenization fails, in which case breaks sit at the exact width.
      */
-    private static TokenInfo tokenInfo(String text, String style) {
+    private static TokenInfo tokenInfo(
+            String text, String style, int maxWidth, CharWidths widths) {
         if (style == null) {
             return null;
         }
@@ -320,45 +395,94 @@ public final class DisplayTextSplitter {
             while (pos <= n) {
                 int nl = text.indexOf('\n', pos);
                 int end = nl < 0 ? n : nl;
-                int len = end - pos;
-                char[] chars = new char[len];
-                if (len > 0) {
-                    text.getChars(pos, end, chars, 0);
-                }
-                Segment segment = new Segment(chars, 0, len);
-                Token nullToken = null;
-                int lastType = state;
-                for (Token t = tokenMaker.getTokenList(segment, state, pos);
-                        t != null;
-                        t = t.getNextToken()) {
-                    int type = t.getType();
-                    if (type == TokenTypes.NULL) {
-                        nullToken = t;
-                        continue;
-                    }
-                    lastType = type;
-                    int length = t.length();
-                    if (length <= 0) {
-                        continue;
-                    }
-                    int offset = t.getOffset();
-                    if (offset < 0 || offset > n) {
-                        continue;
-                    }
-                    int to = Math.min(n, offset + length);
-                    for (int k = offset; k < to; k++) {
-                        info.tokenType[k] = (byte) type;
-                        info.tokenEnd[k] = to;
-                    }
-                }
-                // The HTTP token maker encodes its carried state in the trailing null token; every
-                // other style carries the state the maker reports for the line (as RSTA does), which
-                // lets a multi-line string keep its state (and colour) across rows.
-                state =
+                // A line that cannot affect the carried state is left untokenized: it never wraps,
+                // so it stays a single display row with no spans, and the document tokenizes it
+                // lazily when (and only if) it is painted.
+                boolean tokenize =
                         http
-                                ? HttpTokenMaker.resetAfterLine(
-                                        nullToken != null ? nullToken.getType() : lastType)
-                                : tokenMaker.getLastTokenTypeOnLine(segment, state);
+                                || state != 0
+                                || lineWraps(text, pos, end, maxWidth, widths)
+                                || mayCarryState(text, pos, end);
+                if (tokenize) {
+                    int len = end - pos;
+                    int inState = state;
+                    String context = null;
+                    String line = null;
+                    LineTokens cached = null;
+                    if (len >= MIN_CACHED_LINE) {
+                        // HTTP bodies may only be cached once their delegate is known; header lines
+                        // are cheap and their tokenization feeds the delegate choice.
+                        context =
+                                http
+                                        ? ((HttpTokenMaker) tokenMaker).bodyCacheContext()
+                                        : "";
+                        if (context != null) {
+                            line = text.substring(pos, end);
+                            cached = LINE_CACHE.get(style, context, inState, line);
+                        }
+                    }
+                    if (cached != null) {
+                        System.arraycopy(cached.types, 0, info.tokenType, pos, len);
+                        System.arraycopy(cached.ends, 0, info.tokenEnd, pos, len);
+                        state = cached.outState;
+                    } else {
+                        char[] chars = new char[len];
+                        if (len > 0) {
+                            text.getChars(pos, end, chars, 0);
+                        }
+                        Segment segment = new Segment(chars, 0, len);
+                        Token nullToken = null;
+                        int lastType = inState;
+                        for (Token t = tokenMaker.getTokenList(segment, inState, pos);
+                                t != null;
+                                t = t.getNextToken()) {
+                            int type = t.getType();
+                            if (type == TokenTypes.NULL) {
+                                nullToken = t;
+                                continue;
+                            }
+                            lastType = type;
+                            int length = t.length();
+                            if (length <= 0) {
+                                continue;
+                            }
+                            int offset = t.getOffset();
+                            if (offset < 0 || offset > n) {
+                                continue;
+                            }
+                            int to = Math.min(n, offset + length);
+                            for (int k = offset; k < to; k++) {
+                                info.tokenType[k] = (byte) type;
+                                info.tokenEnd[k] = to;
+                            }
+                        }
+                        // The HTTP token maker encodes its carried state in the trailing null
+                        // token; every other style carries the state the maker reports for the
+                        // line (as RSTA does), which lets a multi-line string keep its state
+                        // across rows.
+                        state =
+                                http
+                                        ? HttpTokenMaker.resetAfterLine(
+                                                nullToken != null ? nullToken.getType() : lastType)
+                                        : tokenMaker instanceof ContinuedStringTokenMaker
+                                                ? ((ContinuedStringTokenMaker) tokenMaker)
+                                                        .lastState()
+                                                : tokenMaker.getLastTokenTypeOnLine(
+                                                        segment, inState);
+                        if (line != null) {
+                            LINE_CACHE.put(
+                                    style,
+                                    context,
+                                    inState,
+                                    line,
+                                    Arrays.copyOfRange(info.tokenType, pos, end),
+                                    Arrays.copyOfRange(info.tokenEnd, pos, end),
+                                    state);
+                        }
+                    }
+                } else {
+                    state = 0;
+                }
                 if (nl < 0) {
                     break;
                 }
@@ -368,6 +492,99 @@ public final class DisplayTextSplitter {
             return null;
         }
         return info;
+    }
+
+
+    /** One tokenized line: per-character token types/ends relative to the line start, and the
+     * state it leaves behind. */
+    private static final class LineTokens {
+        final byte[] types;
+        final int[] ends;
+        final int outState;
+        final long cost;
+
+        LineTokens(byte[] types, int[] ends, int outState) {
+            this.types = types;
+            this.ends = ends;
+            this.outState = outState;
+            this.cost = types.length + 4L * ends.length;
+        }
+    }
+
+    /** Cache key: the tokenization inputs that fully determine a line's tokens. */
+    private static final class Key {
+        private final String style;
+        private final String context;
+        private final int state;
+        private final String line;
+
+        Key(String style, String context, int state, String line) {
+            this.style = style;
+            this.context = context;
+            this.state = state;
+            this.line = line;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Key)) {
+                return false;
+            }
+            Key other = (Key) o;
+            return state == other.state
+                    && style.equals(other.style)
+                    && context.equals(other.context)
+                    && line.equals(other.line);
+        }
+
+        @Override
+        public int hashCode() {
+            int h = style.hashCode();
+            h = 31 * h + context.hashCode();
+            h = 31 * h + state;
+            return 31 * h + line.hashCode();
+        }
+    }
+
+    /** Bounded least-recently-used cache of tokenized lines. */
+    private static final class LineCache {
+        private final long budget;
+        private long retained;
+        private final Map<Key, LineTokens> entries =
+                new LinkedHashMap<>(64, 0.75f, true);
+
+        LineCache(long budget) {
+            this.budget = budget;
+        }
+
+        synchronized LineTokens get(String style, String context, int state, String line) {
+            return entries.get(new Key(style, context, state, line));
+        }
+
+        synchronized void put(
+                String style,
+                String context,
+                int state,
+                String line,
+                byte[] types,
+                int[] ends,
+                int outState) {
+            LineTokens value = new LineTokens(types, ends, outState);
+            LineTokens old = entries.put(new Key(style, context, state, line), value);
+            if (old != null) {
+                retained -= old.cost;
+            }
+            retained += 2L * line.length() + value.cost;
+            Iterator<Map.Entry<Key, LineTokens>> it = entries.entrySet().iterator();
+            while (retained > budget && it.hasNext()) {
+                Map.Entry<Key, LineTokens> eldest = it.next();
+                retained -= 2L * eldest.getKey().line.length() + eldest.getValue().cost;
+                it.remove();
+            }
+        }
     }
 
     /** Per-character original token information used to recolour wrap breaks. */

@@ -4,7 +4,6 @@ import javax.swing.text.Segment;
 import org.fife.ui.rsyntaxtextarea.AbstractTokenMaker;
 import org.fife.ui.rsyntaxtextarea.Token;
 import org.fife.ui.rsyntaxtextarea.TokenMaker;
-import org.fife.ui.rsyntaxtextarea.TokenMakerFactory;
 import org.fife.ui.rsyntaxtextarea.TokenMap;
 import org.fife.ui.rsyntaxtextarea.TokenTypes;
 
@@ -62,10 +61,10 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
      * negative because RSTA only treats tokens with a positive type as paintable/measurable, so a
      * synthetic (non-token-type) state must never be positive.
      */
-    static final int BODY_BASE = -10_000_000;
+    static final int BODY_BASE = -13_000_000;
 
     /** Any line state at or below this value is an encoded body state. */
-    static final int BODY_DETECT = -9_000_000;
+    static final int BODY_DETECT = -11_000_000;
 
     private final boolean response;
     private final boolean headersOnly;
@@ -81,6 +80,7 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
 
     private TokenMaker bodyTokenMaker;
     private boolean bodyResolved;
+    private String bodyStyleKey;
 
     protected HttpTokenMaker(boolean response, boolean headersOnly) {
         this.response = response;
@@ -428,7 +428,12 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
         }
         // Carry the delegate's line state, not the last token type: a string cut by a wrap break is
         // signalled through the state (the ContinuedStringTokenMaker marker), not the token list.
-        int state = dm.getLastTokenTypeOnLine(text, delegateState);
+        // The wrapped delegate records the state while it builds the list; asking it again would
+        // tokenize the whole body line a second time.
+        int state =
+                dm instanceof ContinuedStringTokenMaker
+                        ? ((ContinuedStringTokenMaker) dm).lastState()
+                        : dm.getLastTokenTypeOnLine(text, delegateState);
         endLine(BODY_BASE - state);
         return firstToken;
     }
@@ -437,6 +442,7 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
         if (!bodyResolved) {
             bodyResolved = true;
             String styleKey = ContentType.styleKeyFor(bodyContentType, prefixOf(firstLine));
+            bodyStyleKey = styleKey;
             if (styleKey == null || ContentType.PLAIN_STYLE.equals(styleKey)) {
                 bodyTokenMaker = null;
             } else if (ContentType.FORM_STYLE.equals(styleKey)) {
@@ -447,10 +453,19 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
                 // maker is itself wrapped.
                 bodyTokenMaker =
                         new ContinuedStringTokenMaker(
-                                TokenMakerFactory.getDefaultInstance().getTokenMaker(styleKey));
+                                PrettifyTokenMakerFactory.bodyTokenMaker(styleKey));
             }
         }
         return bodyTokenMaker;
+    }
+
+    /**
+     * Identity of the resolved body delegate, used to key the splitter's per-line token cache, or
+     * null while the headers (and therefore the delegate) are still being read. Plain bodies are not
+     * cached because they are cheap to tokenize.
+     */
+    String bodyCacheContext() {
+        return bodyResolved && bodyTokenMaker != null ? "body:" + bodyStyleKey : null;
     }
 
     /** The body's leading text, used to sniff a style when the content type is not decisive. */

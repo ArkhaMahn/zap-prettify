@@ -42,6 +42,7 @@ public final class PrettyPrint {
                 case "text/css":
                     return braces(body, false, styleKey);
                 case "text/javascript":
+                case "text/typescript":
                     return braces(body, true, styleKey);
                 case ContentType.GRAPHQL_STYLE:
                     return graphql(body);
@@ -67,6 +68,25 @@ public final class PrettyPrint {
             return stripTrailingNewlines(message);
         }
         return message.substring(0, split) + formatBody(bodyStyleKey, message.substring(split));
+    }
+
+    /**
+     * Formats the body of a full message, resolving the body style from {@code contentType} and,
+     * when the content type is not decisive, from the body itself. This lets bodies served with a
+     * custom content type (or with {@code text/plain}) still be pretty-printed as JSON, markup or
+     * JavaScript.
+     */
+    public static String formatMessageFor(String contentType, String message) {
+        if (message == null) {
+            return null;
+        }
+        int split = bodyOffset(message);
+        if (split < 0 || split >= message.length()) {
+            return stripTrailingNewlines(message);
+        }
+        String body = message.substring(split);
+        return message.substring(0, split)
+                + formatBody(ContentType.styleKeyFor(contentType, body), body);
     }
 
     /**
@@ -216,6 +236,25 @@ public final class PrettyPrint {
                 continue;
             }
 
+            if (breakCommaInBraces
+                    && c == 'c'
+                    && startsWord(s, i, "const")
+                    && last != '.'
+                    && !insideParentheses(stack)
+                    && !endsWithWord(out, "export")) {
+                // A declaration always starts its own line, which also recovers statement
+                // boundaries from minified or newline-separated scripts.
+                if (!atLineStart) {
+                    line(out, indent);
+                }
+                out.append("const");
+                atLineStart = false;
+                pendingSpace = false;
+                last = 't';
+                i += "const".length();
+                continue;
+            }
+
             switch (c) {
                 case '{':
                 case '(':
@@ -227,9 +266,15 @@ public final class PrettyPrint {
                     pendingSpace = false;
                     last = c;
                     if (c == '{') {
-                        indent++;
-                        line(out, indent);
-                        atLineStart = true;
+                        int j = nextNonWs(s, i + 1);
+                        if (j < n && s.charAt(j) == '}') {
+                            // Keep an empty object on one line.
+                            atLineStart = false;
+                        } else {
+                            indent++;
+                            line(out, indent);
+                            atLineStart = true;
+                        }
                     }
                     i++;
                     break;
@@ -240,8 +285,10 @@ public final class PrettyPrint {
                         stack.pop();
                     }
                     if (c == '}') {
-                        indent = Math.max(0, indent - 1);
-                        line(out, indent);
+                        if (last != '{') {
+                            indent = Math.max(0, indent - 1);
+                            line(out, indent);
+                        }
                         out.append('}');
                         atLineStart = false;
                         pendingSpace = false;
@@ -249,8 +296,15 @@ public final class PrettyPrint {
                         int j = nextNonWs(s, i + 1);
                         char next = (j < n) ? s.charAt(j) : 0;
                         if (next != ';' && next != ',' && next != ')' && next != ']') {
-                            line(out, indent);
-                            atLineStart = true;
+                            if (breakCommaInBraces
+                                    && nextWordIs(s, i + 1, "else", "catch", "finally", "while")) {
+                                // Keep the clause attached to the block it belongs to.
+                                atLineStart = false;
+                                pendingSpace = true;
+                            } else {
+                                line(out, indent);
+                                atLineStart = true;
+                            }
                         }
                     } else {
                         out.append(c);
@@ -272,6 +326,21 @@ public final class PrettyPrint {
                         pendingSpace = false;
                     }
                     last = ';';
+                    i++;
+                    break;
+                case ':':
+                    spaceBefore(out, pendingSpace, atLineStart, last);
+                    out.append(':');
+                    atLineStart = false;
+                    last = ':';
+                    if (breakCommaInBraces) {
+                        int j = nextNonWs(s, i + 1);
+                        // Object entries, labels and type annotations read better with a space after
+                        // the colon; a following ':' is a CSS pseudo-element or scope operator.
+                        pendingSpace = j >= n || s.charAt(j) != ':';
+                    } else {
+                        pendingSpace = false;
+                    }
                     i++;
                     break;
                 case ',':
@@ -311,6 +380,59 @@ public final class PrettyPrint {
         return c == '(' || c == '[' || c == '{';
     }
 
+    /** Whether {@code word} starts at {@code i} and is not part of a longer identifier. */
+    private static boolean startsWord(String s, int i, String word) {
+        if (!s.startsWith(word, i)) {
+            return false;
+        }
+        int end = i + word.length();
+        return (i == 0 || !isWordChar(s.charAt(i - 1)))
+                && (end == s.length() || !isWordChar(s.charAt(end)));
+    }
+
+    private static boolean isWordChar(char c) {
+        return Character.isLetterOrDigit(c) || c == '_' || c == '$';
+    }
+
+    /**
+     * Whether the innermost open construct is a parenthesis (a {@code for} header, for example)
+     * rather than a block, so a {@code const} there must stay inline.
+     */
+    private static boolean insideParentheses(Deque<Character> stack) {
+        for (Character open : stack) {
+            if (open == '{') {
+                return false;
+            }
+            if (open == '(') {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Whether the formatted output ends with {@code word} as a whole word. */
+    private static boolean nextWordIs(String s, int from, String... words) {
+        int j = nextNonWs(s, from);
+        for (String word : words) {
+            if (startsWord(s, j, word)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean endsWithWord(StringBuilder out, String word) {
+        int end = out.length();
+        while (end > 0 && Character.isWhitespace(out.charAt(end - 1))) {
+            end--;
+        }
+        int start = end - word.length();
+        if (start < 0 || !out.substring(start, end).equals(word)) {
+            return false;
+        }
+        return start == 0 || !isWordChar(out.charAt(start - 1));
+    }
+
     // ---------------------------------------------------------------------
     // XML / HTML
     // ---------------------------------------------------------------------
@@ -319,6 +441,8 @@ public final class PrettyPrint {
     private static final int T_OPEN = 1;
     private static final int T_CLOSE = 2;
     private static final int T_OTHER = 3;
+    /** Script/style/pre content, copied without markup parsing. */
+    private static final int T_RAW_TEXT = 4;
 
     private static final class Piece {
         int type;
@@ -339,25 +463,19 @@ public final class PrettyPrint {
         if (lex == null) {
             return s;
         }
-        List<Piece> pieces = tokenizeMarkup(s, lex);
+        List<Piece> pieces = tokenizeMarkup(s);
         List<Object> tree = buildTree(pieces, html);
         StringBuilder out = new StringBuilder(s.length() + 64);
         render(tree, 0, s, html, out);
         return out.toString();
     }
 
-    private static List<Piece> tokenizeMarkup(String s, Lexer lex) {
+    private static List<Piece> tokenizeMarkup(String s) {
         List<Piece> pieces = new ArrayList<>();
         int n = s.length();
         int i = 0;
         while (i < n) {
-            int lt = -1;
-            for (int k = i; k < n; k++) {
-                if (s.charAt(k) == '<' && !lex.literal[k]) {
-                    lt = k;
-                    break;
-                }
-            }
+            int lt = s.indexOf('<', i);
             if (lt < 0) {
                 addText(pieces, i, n);
                 break;
@@ -380,12 +498,17 @@ public final class PrettyPrint {
                 e = (e < 0) ? n : e + 1;
                 addOther(pieces, lt, e);
                 i = e;
-            } else if (!lex.tagDelim[lt]) {
+            } else if (!isTagStart(s, lt)) {
                 // A stray '<' in text rather than a tag start.
                 addText(pieces, lt, lt + 1);
                 i = lt + 1;
             } else {
-                int e = findTagEnd(s, lt, lex);
+                int e = findTagEnd(s, lt);
+                if (e < 0) {
+                    addText(pieces, lt, lt + 1);
+                    i = lt + 1;
+                    continue;
+                }
                 String inner = s.substring(lt + 1, e);
                 Piece p = new Piece();
                 p.start = lt;
@@ -408,9 +531,38 @@ public final class PrettyPrint {
                 }
                 pieces.add(p);
                 i = e + 1;
+                if (p.type == T_OPEN && isRawText(p.tag)) {
+                    // Script, style, pre and textarea content is not markup: copy it whole so the
+                    // closing tag (and any '<' or '>' inside) is not mistaken for a tag. Script and
+                    // style bodies are re-indented when rendered; pre/textarea stay verbatim.
+                    String closeTag = "</" + p.tag;
+                    int close = indexOfIgnoreCase(s, closeTag, i);
+                    int rawEnd = (close < 0) ? n : close;
+                    addRaw(pieces, i, rawEnd);
+                    i = rawEnd;
+                }
             }
         }
         return pieces;
+    }
+
+    /** Elements whose content is text rather than markup. */
+    private static boolean isRawText(String tag) {
+        String t = tag.toLowerCase(Locale.ROOT);
+        return t.equals("script")
+                || t.equals("style")
+                || t.equals("pre")
+                || t.equals("textarea");
+    }
+
+    private static int indexOfIgnoreCase(String s, String needle, int from) {
+        int limit = s.length() - needle.length();
+        for (int i = Math.max(0, from); i <= limit; i++) {
+            if (s.regionMatches(true, i, needle, 0, needle.length())) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     private static void addText(List<Piece> pieces, int start, int end) {
@@ -429,13 +581,23 @@ public final class PrettyPrint {
         pieces.add(p);
     }
 
-    private static int findTagEnd(String s, int lt, Lexer lex) {
+    private static void addRaw(List<Piece> pieces, int start, int end) {
+        Piece p = new Piece();
+        p.type = T_RAW_TEXT;
+        p.start = start;
+        p.end = end;
+        pieces.add(p);
+    }
+
+    /**
+     * Returns the index of the '>' that ends the tag starting at {@code lt}, or -1 when the '<' is
+     * not the start of a well-formed tag. Quotes are tracked so '>' inside an attribute value does
+     * not end the tag.
+     */
+    private static int findTagEnd(String s, int lt) {
         int n = s.length();
         char quote = 0;
         for (int i = lt + 1; i < n; i++) {
-            if (lex.literal[i]) {
-                continue;
-            }
             char c = s.charAt(i);
             if (quote != 0) {
                 if (c == quote) {
@@ -445,9 +607,26 @@ public final class PrettyPrint {
                 quote = c;
             } else if (c == '>') {
                 return i;
+            } else if (c == '<') {
+                return -1;
             }
         }
-        return n - 1;
+        return -1;
+    }
+
+    private static boolean isTagStart(String s, int lt) {
+        int n = s.length();
+        if (lt + 1 >= n) {
+            return false;
+        }
+        char c = s.charAt(lt + 1);
+        if (c == '/' || c == '!' || c == '?') {
+            return true;
+        }
+        if (!Character.isLetter(c)) {
+            return false;
+        }
+        return findTagEnd(s, lt) >= 0;
     }
 
     private static int firstWs(String s) {
@@ -466,7 +645,8 @@ public final class PrettyPrint {
         lists.push(root);
         for (Piece p : pieces) {
             List<Object> current = lists.peek();
-            if (p.type == T_TEXT || p.type == T_OTHER) {
+            if (p.type != T_OPEN && p.type != T_CLOSE) {
+                // Text, comments and raw script/style content all stay in the current list.
                 current.add(p);
                 continue;
             }
@@ -515,7 +695,10 @@ public final class PrettyPrint {
                 continue;
             }
             Element e = (Element) node;
-            if (isInline(e, src)) {
+            String tag = e.open.tag == null ? "" : e.open.tag.toLowerCase(Locale.ROOT);
+            if (isRawText(tag)) {
+                renderRaw(e, tag, indent, src, out);
+            } else if (isInline(e, src)) {
                 line(out, indent);
                 out.append(collapseWs(src.substring(e.open.start, e.close.end).trim()));
                 out.append('\n');
@@ -530,6 +713,74 @@ public final class PrettyPrint {
                     out.append('\n');
                 }
             }
+        }
+    }
+
+    /**
+     * Renders a raw-text element. Script and style content is re-indented as JavaScript/CSS; pre and
+     * textarea content keeps its exact whitespace.
+     */
+    private static void renderRaw(
+            Element e, String tag, int indent, String src, StringBuilder out) {
+        String open = collapseWs(src.substring(e.open.start, e.open.end));
+        String close =
+                e.close == null ? "" : collapseWs(src.substring(e.close.start, e.close.end));
+        String raw = rawText(e, src);
+        if (raw.trim().isEmpty()) {
+            line(out, indent);
+            out.append(open).append(close);
+            out.append('\n');
+            return;
+        }
+        if (tag.equals("pre") || tag.equals("textarea")) {
+            line(out, indent);
+            out.append(src, e.open.start, e.close == null ? e.open.end : e.close.end);
+            out.append('\n');
+            return;
+        }
+        line(out, indent);
+        out.append(open);
+        out.append('\n');
+        String formatted =
+                tag.equals("style")
+                        ? braces(raw, false, "text/css")
+                        : braces(raw, true, "text/javascript");
+        appendIndented(out, formatted, indent + 1);
+        if (e.close != null) {
+            line(out, indent);
+            out.append(close);
+            out.append('\n');
+        }
+    }
+
+    private static String rawText(Element e, String src) {
+        StringBuilder b = new StringBuilder();
+        for (Object child : e.children) {
+            if (child instanceof Piece) {
+                Piece p = (Piece) child;
+                if (p.type == T_RAW_TEXT) {
+                    b.append(src, p.start, p.end);
+                }
+            }
+        }
+        return b.toString();
+    }
+
+    /** Appends every non-empty line of {@code text} indented by {@code indent} levels. */
+    private static void appendIndented(StringBuilder out, String text, int indent) {
+        int i = 0;
+        while (i < text.length()) {
+            int nl = text.indexOf('\n', i);
+            int end = nl < 0 ? text.length() : nl;
+            if (end > i) {
+                appendIndent(out, indent);
+                out.append(text, i, end);
+                out.append('\n');
+            }
+            if (nl < 0) {
+                break;
+            }
+            i = nl + 1;
         }
     }
 
