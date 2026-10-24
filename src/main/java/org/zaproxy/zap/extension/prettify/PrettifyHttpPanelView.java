@@ -9,11 +9,11 @@ import java.awt.event.ComponentAdapter;
 import java.awt.event.ComponentEvent;
 import java.awt.font.FontRenderContext;
 import java.util.List;
-import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
+import javax.swing.JPopupMenu;
 import javax.swing.ScrollPaneConstants;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
@@ -23,14 +23,12 @@ import javax.swing.text.DefaultHighlighter;
 import javax.swing.text.Document;
 import javax.swing.text.Highlighter;
 import org.apache.commons.configuration.FileConfiguration;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 import org.fife.ui.rsyntaxtextarea.RSyntaxDocument;
 import org.fife.ui.rtextarea.Gutter;
 import org.fife.ui.rtextarea.RTextScrollPane;
 import org.parosproxy.paros.Constant;
+import org.parosproxy.paros.network.HttpHeader;
 import org.parosproxy.paros.network.HttpMessage;
-import org.parosproxy.paros.network.HttpRequestHeader;
 import org.zaproxy.zap.extension.httppanel.Message;
 import org.zaproxy.zap.extension.httppanel.view.AbstractStringHttpPanelViewModel;
 import org.zaproxy.zap.extension.httppanel.view.HttpPanelView;
@@ -40,23 +38,25 @@ import org.zaproxy.zap.extension.httppanel.view.HttpPanelViewModelListener;
 import org.zaproxy.zap.extension.search.SearchMatch;
 import org.zaproxy.zap.extension.search.SearchableHttpPanelView;
 import org.zaproxy.zap.utils.DisplayUtils;
+import org.parosproxy.paros.view.View;
+import org.zaproxy.zap.view.messagecontainer.MessageContainer;
+import org.zaproxy.zap.view.messagecontainer.http.DefaultSingleHttpMessageContainer;
+import org.zaproxy.zap.view.messagecontainer.http.SingleHttpMessageContainer;
 
 /**
  * An {@link HttpPanelView} that shows the raw HTTP message (or one of its parts) as a Burp-style,
  * syntax-highlighted, word-wrapped text area.
  *
  * <p>The message is shown exactly as sent/received, with content-type based syntax highlighting
- * always on. Overlong single lines are pre-broken at the wrap column (see {@link
- * DisplayTextSplitter}) so the wrapped view stays fast; the original text and the exact break
- * offsets are kept so search can map back to the untouched message.
+ * always on. Both read-only and editable views use soft wrap like the core text view; the
+ * text area handles line wrapping, so no synthetic line breaks are inserted and the gutter
+ * numbers original message lines.
  *
  * <p>Text preparation happens off the Event Dispatch Thread and is cancelled when a newer message
  * arrives.
  */
 public class PrettifyHttpPanelView
         implements HttpPanelView, HttpPanelViewModelListener, SearchableHttpPanelView {
-
-    private static final Logger LOGGER = LogManager.getLogger(PrettifyHttpPanelView.class);
 
     /** Which part of an HTTP message this view shows. */
     public enum Target {
@@ -118,12 +118,6 @@ public class PrettifyHttpPanelView
     private boolean changed;
 
     /**
-     * Where the caret is, counted in the characters that are not whitespace. The count survives the
-     * re-formatting of the text, which moves the caret but not the characters around it.
-     */
-    private int pendingCaretCount = -1;
-
-    /**
      * Start offsets of the rows the gutter numbers (the rows that are a line of the message).
      * Kept while the user edits, so the numbering follows the text as it is typed.
      */
@@ -137,17 +131,6 @@ public class PrettifyHttpPanelView
 
     /** The display text the row offsets above belong to. */
     private String gutterRowsText = "";
-
-    /**
-     * The request body the view last showed. ZAP moves the body into the query string when the
-     * method changes away from POST and moves it back when it changes to POST; on the way back a
-     * parameter that has no value is re-encoded as {@code name=}, so the body comes back with a
-     * "=" it never had. The body is remembered so that this can be undone.
-     */
-    private String lastShownBody = "";
-
-    /** The request method the view last showed, to notice a change of the verb. */
-    private String lastShownMethod = "";
 
     private String configurationKey = "";
 
@@ -167,11 +150,11 @@ public class PrettifyHttpPanelView
         this.textArea = new PrettifyTextArea(DisplayUtils.isDarkLookAndFeel());
         this.scrollPane = new RTextScrollPane(textArea, true);
         applyGutterTheme();
-        // The text is pre-wrapped to fit the viewport, so a horizontal scrollbar could never reveal
-        // anything: its thumb would always span the full track. Disable it so the wrap appears
-        // contained instead of showing a redundant bar.
-        this.scrollPane.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        // Soft wrap: allow horizontal scrolling when needed (e.g., very long unbreakable lines).
+        this.scrollPane.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED);
         this.mainPanel.add(scrollPane, BorderLayout.CENTER);
+        // Install ZAP's standard context menu (Copy, Send to..., etc.) like the core Text view.
+        textArea.setComponentPopupMenu(new PrettifyPopupMenu());
         this.textArea.addComponentListener(
                 new ComponentAdapter() {
                     @Override
@@ -277,8 +260,12 @@ public class PrettifyHttpPanelView
             final String style,
             int widthPx,
             final long gen) {
+        // Both editable and read-only views use soft wrap like the core text view.
+        // The identity split means the display text equals the formatted text,
+        // so search/copy/save work on the same text without offset mapping.
+        final String source = text == null ? "" : text;
         final DisplayTextSplitter.Split prepared =
-                DisplayTextSplitter.split(text, numberingSource, style, widthPx, charWidths());
+                new DisplayTextSplitter.Split(source, source, new int[0], numberingSource);
         if (prepared == null) {
             return;
         }
@@ -309,8 +296,6 @@ public class PrettifyHttpPanelView
         installedDigits = digits(newSplit.originalLineCount());
         // The text the user sees is the text we installed, so any earlier edit is gone.
         changed = false;
-        restoreCaret();
-        rememberBody();
         // The document is laid out once the pending revalidation has run; only then does the text
         // area report the width it can really paint in.
         Timer check =
@@ -352,22 +337,6 @@ public class PrettifyHttpPanelView
                         // Style change only, the text is the same.
                     }
                 });
-    }
-
-    /** Puts the caret back where the user left it after the view was re-rendered. */
-    private void restoreCaret() {
-        if (pendingCaretCount < 0) {
-            return;
-        }
-        int count = pendingCaretCount;
-        pendingCaretCount = -1;
-        try {
-            String text = textArea.getText();
-            int offset = offsetAfterNonWhitespace(text, count);
-            textArea.setCaretPosition(Math.min(offset, text.length()));
-        } catch (Exception ignored) {
-            // The document shrank; leave the caret where it is.
-        }
     }
 
     /**
@@ -804,25 +773,8 @@ public class PrettifyHttpPanelView
     }
 
     private void resplitIfWidthChanged() {
-        if (editable || changed) {
-            // The user is editing: re-splitting would replace the text they are working on.
-            return;
-        }
-        int widthPx = currentWrapWidthPx();
-        if (widthPx <= 0 || widthPx == wrappedWidthPx) {
-            return;
-        }
-        if (resplitTimer == null) {
-            resplitTimer =
-                    new Timer(
-                            150,
-                            e -> {
-                                widthCorrections = 0;
-                                update(currentWrapWidthPx());
-                            });
-            resplitTimer.setRepeats(false);
-        }
-        resplitTimer.restart();
+        // Soft wrap is handled by the text area; no re-split needed.
+        return;
     }
 
     /** Wrap width measured from the laid-out text area, falling back to the viewport. */
@@ -936,157 +888,10 @@ public class PrettifyHttpPanelView
 
     @Override
     public void save() {
-        // What is shown is what is sent: the body stays formatted, as the view shows it.
-        String text = messageText();
-        try {
-            model.setData(text);
-        } catch (RuntimeException e) {
-            LOGGER.warn("Could not save the edited message.", e);
-            return;
-        }
+        // What is shown is what is sent, exactly like the core text view: no whitespace mapping,
+        // no content-type guessing, and a malformed message is reported to the caller.
+        model.setData(textArea.getText());
         changed = false;
-        rememberBody();
-        // The body is in the message now, so the request can be given the content type it has.
-        setContentTypeIfMissing();
-        // The message now holds the text the user typed, so the view is rendered again from it;
-        // that also rebuilds the wrap breaks, so a further edit is unwrapped correctly.
-        pendingCaretCount =
-                countNonWhitespace(textArea.getText(), 0, textArea.getCaretPosition());
-        update();
-    }
-
-    /**
-     * The message text to save: the message as it is, with the change the user made in the
-     * formatted view applied to it. The message keeps the whitespace it was received with, the
-     * formatted view is only a view of it.
-     */
-    private String messageText() {
-        String edited = textArea.getText();
-        DisplayTextSplitter.Split activeSplit = split;
-        if (activeSplit == null) {
-            return edited;
-        }
-        String raw = rawText();
-        return applyEditToRaw(raw, projection(raw), activeSplit.toMessageText(edited));
-    }
-
-    /**
-     * The formatted text the Pretty view shows for the given message text. It is worked out again
-     * when the message is saved, because the view may not have been rendered since the last change.
-     */
-    private String projection(String raw) {
-        Message message = model.getMessage();
-        return format(raw, contentTypeOf(message), shouldStripTrailingNewlines(message));
-    }
-
-    /** The message as it is, without the formatting the Pretty view shows. */
-    private String rawText() {
-        return model.getData();
-    }
-
-    /**
-     * Applies the change the user made in the formatted text to the message text. The two texts
-     * hold the same characters apart from the whitespace the formatter changed, so the changed
-     * range is found by counting the characters that are not whitespace.
-     */
-    static String applyEditToRaw(String raw, String formatted, String edited) {
-        if (raw == null || edited == null || formatted == null) {
-            return edited;
-        }
-        if (formatted.equals(edited)) {
-            return raw;
-        }
-        int prefix = 0;
-        int limit = Math.min(formatted.length(), edited.length());
-        while (prefix < limit && formatted.charAt(prefix) == edited.charAt(prefix)) {
-            prefix++;
-        }
-        int suffix = 0;
-        while (suffix < limit - prefix
-                && formatted.charAt(formatted.length() - 1 - suffix)
-                        == edited.charAt(edited.length() - 1 - suffix)) {
-            suffix++;
-        }
-        int total = countNonWhitespace(formatted, 0, formatted.length());
-        int inSuffix = countNonWhitespace(formatted, formatted.length() - suffix, formatted.length());
-        if (countNonWhitespace(raw, 0, raw.length()) != total) {
-            // The formatter changed more than the whitespace: the change cannot be placed.
-            return edited;
-        }
-        int before = countNonWhitespace(formatted, 0, prefix);
-        int after = total - inSuffix;
-        int rawStart = offsetOfNonWhitespace(raw, before + 1);
-        int rawEnd = offsetOfNonWhitespace(raw, after + 1);
-        if (rawStart < 0 || rawEnd < rawStart || rawEnd > raw.length()) {
-            return edited;
-        }
-        int editedEnd = edited.length() - suffix;
-        if (rawStart == rawEnd) {
-            // Nothing was there: the whitespace that follows the inserted text belongs with it, or
-            // the line the text was inserted in would be joined with the next one.
-            editedEnd += leadingWhitespace(edited, editedEnd);
-        }
-        return raw.substring(0, rawStart)
-                + edited.substring(prefix, editedEnd)
-                + raw.substring(rawEnd);
-    }
-
-    /** The offset of the {@code count}th character that is not whitespace, or the text length. */
-    private static int offsetOfNonWhitespace(String text, int count) {
-        if (count <= 0) {
-            return 0;
-        }
-        int seen = 0;
-        for (int i = 0; i < text.length(); i++) {
-            if (!Character.isWhitespace(text.charAt(i))) {
-                seen++;
-                if (seen == count) {
-                    return i;
-                }
-            }
-        }
-        return text.length();
-    }
-
-    /** The number of whitespace characters at the given offset. */
-    private static int leadingWhitespace(String text, int offset) {
-        int count = 0;
-        while (offset + count < text.length() && Character.isWhitespace(text.charAt(offset + count))) {
-            count++;
-        }
-        return count;
-    }
-
-    /** The number of characters that are not whitespace in {@code text[from, to)}. */
-    private static int countNonWhitespace(String text, int from, int to) {
-        int count = 0;
-        int end = Math.min(to, text.length());
-        for (int i = Math.max(0, from); i < end; i++) {
-            if (!Character.isWhitespace(text.charAt(i))) {
-                count++;
-            }
-        }
-        return count;
-    }
-
-    /**
-     * The offset in {@code text} just after the {@code count}th character that is not whitespace, or
-     * the length of the text when it holds fewer.
-     */
-    private static int offsetAfterNonWhitespace(String text, int count) {
-        if (count <= 0) {
-            return 0;
-        }
-        int seen = 0;
-        for (int i = 0; i < text.length(); i++) {
-            if (!Character.isWhitespace(text.charAt(i))) {
-                seen++;
-                if (seen == count) {
-                    return i + 1;
-                }
-            }
-        }
-        return text.length();
     }
 
     @Override
@@ -1118,17 +923,13 @@ public class PrettifyHttpPanelView
         }
         this.editable = editable;
         textArea.setEditable(editable);
-        // The rows of a view that is only read are broken up to the width of the viewport; an
-        // editable view is wrapped by the text area, which re-wraps what the user types.
-        textArea.setLineWrap(editable);
+        // Both editable and read-only views soft-wrap like the core text view.
+        textArea.setLineWrap(true);
         if (!editable) {
             // A view that cannot be edited must not carry changes into the message.
             changed = false;
         }
         if (!changed && model.getMessage() != null) {
-            // The request may carry a body that says what it is; the header is filled in before
-            // the view is rendered, so that it is shown with the content type.
-            setContentTypeIfMissing();
             // The document of an editable view is a plain one (the wrapped rows of a read-only
             // document carry the tokens of the unwrapped text, which an edit would invalidate), so
             // the view is rendered again to get the right kind of document.
@@ -1153,168 +954,7 @@ public class PrettifyHttpPanelView
 
     @Override
     public void dataChanged(HttpPanelViewModelEvent e) {
-        undoZapBodyChange();
-        setContentTypeIfMissing();
         update();
-    }
-
-    /**
-     * Gives a request that carries a body the content type it has, when it does not have one: the
-     * type is taken from the body, so that a request sent with a JSON body says that it is JSON.
-     * Only a request that is being edited is touched.
-     */
-    private void setContentTypeIfMissing() {
-        if (!editable) {
-            return;
-        }
-        if (target != Target.REQUEST_BODY && target != Target.REQUEST_ALL) {
-            return;
-        }
-        Message message = model.getMessage();
-        if (!(message instanceof HttpMessage)) {
-            return;
-        }
-        HttpMessage httpMessage = (HttpMessage) message;
-        HttpRequestHeader header = httpMessage.getRequestHeader();
-        if (header == null) {
-            return;
-        }
-        if (!methodCarriesBody(header.getMethod())) {
-            return;
-        }
-        String body =
-                httpMessage.getRequestBody() == null
-                        ? ""
-                        : httpMessage.getRequestBody().toString();
-        if (body.trim().isEmpty()) {
-            return;
-        }
-        String contentType = ContentType.contentTypeFor(ContentType.sniff(body));
-        if (contentType == null) {
-            // The body does not say what it is, so nothing is guessed.
-            return;
-        }
-        String current = header.getHeader("Content-Type");
-        if (current == null) {
-            // The request does not say what it carries.
-            header.setHeader("Content-Type", contentType);
-            return;
-        }
-        if (contentType.equals(current)) {
-            return;
-        }
-        if (isFormContentType(current) && !isFormContentType(contentType)) {
-            // ZAP labels a request as a form when it moves the query string back into the body;
-            // the body says what it is, so the label is corrected.
-            header.setHeader("Content-Type", contentType);
-        }
-    }
-
-    /** Whether a content type names a form body. */
-    private static boolean isFormContentType(String contentType) {
-        return contentType != null
-                && contentType.toLowerCase(Locale.ROOT).contains("x-www-form-urlencoded");
-    }
-
-    /** Whether a request method normally carries a body. */
-    private static boolean methodCarriesBody(String method) {
-        if (method == null) {
-            return false;
-        }
-        switch (method.toUpperCase(Locale.ROOT)) {
-            case "POST":
-            case "PUT":
-            case "PATCH":
-            case "UPDATE":
-                return true;
-            default:
-                return false;
-        }
-    }
-
-    /**
-     * Puts the request body back when ZAP changed it while the method was changed. The body is
-     * moved into the query string and back again, and a parameter without a value gains a "=" on
-     * the way back, so the body that comes back is not the body that was there.
-     */
-    private void undoZapBodyChange() {
-        if (!editable) {
-            return;
-        }
-        String data = model.getData();
-        String body = bodyOf(data);
-        String method = methodOf(data);
-        if (body != null && !body.isEmpty()) {
-            String remembered = lastShownBody;
-            boolean methodChanged = !method.equals(lastShownMethod);
-            if (!changed
-                    && !remembered.isEmpty()
-                    && !body.equals(remembered)
-                    && (methodChanged || body.equals(remembered + "="))) {
-                // ZAP moved the body into the query string and back again: the body it puts back is
-                // not the body that was there (it re-encodes a parameter without a value as
-                // "name=").
-                setBodyOf(data, remembered);
-            }
-            rememberBody();
-        }
-        // An empty body is not remembered: the body is empty while it is in the query string, and
-        // it is the body that was there before that has to be remembered.
-        lastShownMethod = method;
-    }
-
-    /** The request method of the message, or an empty string when it is not a request. */
-    private String methodOf(String data) {
-        if (target == Target.RESPONSE_BODY
-                || target == Target.RESPONSE_ALL
-                || target == Target.RESPONSE_HEAD) {
-            return "";
-        }
-        Message message = model.getMessage();
-        if (!(message instanceof HttpMessage)) {
-            return "";
-        }
-        HttpRequestHeader header = ((HttpMessage) message).getRequestHeader();
-        return header == null || header.getMethod() == null ? "" : header.getMethod();
-    }
-
-    /**
-     * Keeps track of the body the view shows. An empty body is not remembered: the body is empty
-     * while it is in the query string, and it is the body that was there before that has to be
-     * remembered.
-     */
-    private void rememberBody() {
-        String body = bodyOf(model.getData());
-        if (body == null || body.isEmpty()) {
-            return;
-        }
-        lastShownBody = body;
-    }
-
-    /** The request body of the message data, or null when this view does not show a body. */
-    private String bodyOf(String data) {
-        if (data == null) {
-            return null;
-        }
-        if (target == Target.REQUEST_BODY) {
-            return data;
-        }
-        if (target != Target.REQUEST_ALL) {
-            return null;
-        }
-        int split = data.indexOf("\n\n");
-        return split < 0 ? "" : data.substring(split + 2);
-    }
-
-    /** Writes the request body back into the message data. */
-    private void setBodyOf(String data, String body) {
-        if (target == Target.REQUEST_BODY) {
-            model.setData(body);
-            return;
-        }
-        int split = data == null ? -1 : data.indexOf("\n\n");
-        String header = split < 0 ? "" : data.substring(0, split);
-        model.setData(header + "\n\n" + body);
     }
 
     @Override
@@ -1328,29 +968,57 @@ public class PrettifyHttpPanelView
                 start = activeSplit.toOriginalOffset(start);
                 end = activeSplit.toOriginalOffset(end);
             }
+            SearchMatch.Location location = locationFor(start);
+            if (isAllTarget()) {
+                if (isHeadLocation(location)) {
+                    end = Math.min(end, headerLength());
+                } else {
+                    // The All views report body positions relative to the body, like the core
+                    // views.
+                    int headerLength = headerLength();
+                    start = Math.max(0, start - headerLength);
+                    end = Math.max(0, end - headerLength);
+                }
+            }
             if (start >= end) {
                 continue;
             }
-            matches.add(new SearchMatch(location(), start, end));
+            matches.add(new SearchMatch(location, start, end));
         }
     }
 
     @Override
     public void highlight(SearchMatch searchMatch) {
+        SearchMatch.Location location = searchMatch.getLocation();
+        if (!acceptsLocation(location)) {
+            return;
+        }
         int start = searchMatch.getStart();
         int end = searchMatch.getEnd();
+        if (isAllTarget()) {
+            if (isHeadLocation(location)) {
+                end = Math.min(end, headerLength());
+            } else {
+                // Body positions are relative to the body; the view shows the whole message.
+                int headerLength = headerLength();
+                start += headerLength;
+                end += headerLength;
+            }
+        }
         DisplayTextSplitter.Split activeSplit = split;
         if (activeSplit != null) {
             start = activeSplit.toDisplayOffset(start);
             end = activeSplit.toDisplayOffset(end);
         }
+        Highlighter highlighter = textArea.getHighlighter();
+        // The requester clears the previous match by highlighting a zero-length match, so the old
+        // highlight must go even when there is nothing new to paint. The core views do the same.
+        highlighter.removeAllHighlights();
         int length = textArea.getDocument().getLength();
         if (start < 0 || end > length || start >= end) {
             return;
         }
         try {
-            Highlighter highlighter = textArea.getHighlighter();
-            highlighter.removeAllHighlights();
             highlighter.addHighlight(
                     start,
                     end,
@@ -1361,7 +1029,8 @@ public class PrettifyHttpPanelView
         }
     }
 
-    private SearchMatch.Location location() {
+    /** The location of a match at {@code originalOffset}, as the core views report it. */
+    private SearchMatch.Location locationFor(int originalOffset) {
         switch (target) {
             case REQUEST_BODY:
                 return SearchMatch.Location.REQUEST_BODY;
@@ -1369,8 +1038,94 @@ public class PrettifyHttpPanelView
                 return SearchMatch.Location.RESPONSE_HEAD;
             case RESPONSE_BODY:
                 return SearchMatch.Location.RESPONSE_BODY;
+            case RESPONSE_ALL:
+                return originalOffset < headerLength()
+                        ? SearchMatch.Location.RESPONSE_HEAD
+                        : SearchMatch.Location.RESPONSE_BODY;
+            case REQUEST_ALL:
+                return originalOffset < headerLength()
+                        ? SearchMatch.Location.REQUEST_HEAD
+                        : SearchMatch.Location.REQUEST_BODY;
+            case REQUEST_HEAD:
             default:
                 return SearchMatch.Location.REQUEST_HEAD;
+        }
+    }
+
+    /** Whether this view shows matches with the given location. */
+    private boolean acceptsLocation(SearchMatch.Location location) {
+        switch (target) {
+            case REQUEST_HEAD:
+                return SearchMatch.Location.REQUEST_HEAD.equals(location);
+            case REQUEST_BODY:
+                return SearchMatch.Location.REQUEST_BODY.equals(location);
+            case RESPONSE_HEAD:
+                return SearchMatch.Location.RESPONSE_HEAD.equals(location);
+            case RESPONSE_BODY:
+                return SearchMatch.Location.RESPONSE_BODY.equals(location);
+            case REQUEST_ALL:
+                return SearchMatch.Location.REQUEST_HEAD.equals(location)
+                        || SearchMatch.Location.REQUEST_BODY.equals(location);
+            case RESPONSE_ALL:
+                return SearchMatch.Location.RESPONSE_HEAD.equals(location)
+                        || SearchMatch.Location.RESPONSE_BODY.equals(location);
+            default:
+                return false;
+        }
+    }
+
+    private boolean isAllTarget() {
+        return target == Target.REQUEST_ALL || target == Target.RESPONSE_ALL;
+    }
+
+    private static boolean isHeadLocation(SearchMatch.Location location) {
+        return SearchMatch.Location.REQUEST_HEAD.equals(location)
+                || SearchMatch.Location.RESPONSE_HEAD.equals(location);
+    }
+
+    /**
+     * Length of the header block in the same coordinates the display offsets map back to (LF line
+     * endings), or 0 when this view does not show a whole message.
+     */
+    private int headerLength() {
+        Message message = model.getMessage();
+        if (!(message instanceof HttpMessage)) {
+            return 0;
+        }
+        HttpMessage httpMessage = (HttpMessage) message;
+        HttpHeader header;
+        if (target == Target.REQUEST_ALL) {
+            header = httpMessage.getRequestHeader();
+        } else if (target == Target.RESPONSE_ALL) {
+            header = httpMessage.getResponseHeader();
+        } else {
+            return 0;
+        }
+        return header == null ? 0 : header.toString().replace(HttpHeader.CRLF, HttpHeader.LF).length();
+    }
+
+    /**
+     * Popup menu that shows ZAP's standard message context menu (Copy, Send to..., etc.),
+     * mirroring the core {@link org.zaproxy.zap.extension.httppanel.view.text.HttpPanelTextView.CustomPopupMenu}.
+     */
+    private class PrettifyPopupMenu extends JPopupMenu {
+
+        private static final long serialVersionUID = 1L;
+
+        @Override
+        public void show(Component invoker, int x, int y) {
+            if (!textArea.isFocusOwner()) {
+                textArea.requestFocusInWindow();
+            }
+            Message msg = model.getMessage();
+            if (msg instanceof HttpMessage) {
+                SingleHttpMessageContainer messageContainer =
+                        new DefaultSingleHttpMessageContainer(
+                                configurationKey, textArea, (HttpMessage) msg);
+                View.getSingleton().getPopupMenu().show(messageContainer, x, y);
+            } else {
+                View.getSingleton().getPopupMenu().show(textArea, x, y);
+            }
         }
     }
 }
