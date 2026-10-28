@@ -66,6 +66,7 @@ public class ExtensionPrettify extends ExtensionAdaptor {
         if (getView() == null) {
             return;
         }
+        PrettifyTextActions.init();
         HttpPanelManager panelManager = HttpPanelManager.getInstance();
         panelManager.addRequestViewFactory(
                 "RequestSplit",
@@ -143,6 +144,7 @@ public class ExtensionPrettify extends ExtensionAdaptor {
         safe(() -> panelManager.removeRequestViews("RequestAll", VIEW_REQUEST_ALL, null), "request views");
         safe(() -> panelManager.removeResponseViews("ResponseAll", VIEW_RESPONSE_ALL, null), "response views");
 
+        PrettifyTextActions.remove();
         PrettifyExecutor.shutdown();
     }
 

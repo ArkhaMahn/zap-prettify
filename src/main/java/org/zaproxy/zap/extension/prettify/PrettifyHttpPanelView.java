@@ -14,14 +14,13 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
+import javax.swing.JPopupMenu;
 import javax.swing.ScrollPaneConstants;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
-import javax.swing.text.DefaultHighlighter;
 import javax.swing.text.Document;
-import javax.swing.text.Highlighter;
 import org.apache.commons.configuration.FileConfiguration;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -31,6 +30,7 @@ import org.fife.ui.rtextarea.RTextScrollPane;
 import org.parosproxy.paros.Constant;
 import org.parosproxy.paros.network.HttpMessage;
 import org.parosproxy.paros.network.HttpRequestHeader;
+import org.parosproxy.paros.view.View;
 import org.zaproxy.zap.extension.httppanel.Message;
 import org.zaproxy.zap.extension.httppanel.view.AbstractStringHttpPanelViewModel;
 import org.zaproxy.zap.extension.httppanel.view.HttpPanelView;
@@ -40,23 +40,35 @@ import org.zaproxy.zap.extension.httppanel.view.HttpPanelViewModelListener;
 import org.zaproxy.zap.extension.search.SearchMatch;
 import org.zaproxy.zap.extension.search.SearchableHttpPanelView;
 import org.zaproxy.zap.utils.DisplayUtils;
+import org.zaproxy.zap.view.messagecontainer.http.DefaultSingleHttpMessageContainer;
 
 /**
- * An {@link HttpPanelView} that shows the raw HTTP message (or one of its parts) as a Burp-style,
- * syntax-highlighted, word-wrapped text area.
+ * An {@link HttpPanelView} that shows an HTTP message (or one of its parts) as a Burp-style,
+ * syntax-highlighted, pre-wrapped text area.
  *
- * <p>The message is shown exactly as sent/received, with content-type based syntax highlighting
- * always on. Overlong single lines are pre-broken at the wrap column (see {@link
- * DisplayTextSplitter}) so the wrapped view stays fast; the original text and the exact break
- * offsets are kept so search can map back to the untouched message.
+ * <p>The raw message is the source of truth. The pretty printer produces a whitespace-only
+ * projection for display, and the display text is pre-broken at the viewport width by {@link
+ * DisplayTextSplitter}. Pre-breaking keeps the text area on its fast, non-wrapping layout path:
+ * real soft wrap makes RSyntaxTextArea re-measure and re-layout every row while painting and
+ * scrolling, which is visibly slow even for messages of a few thousand characters.
  *
- * <p>Text preparation happens off the Event Dispatch Thread and is cancelled when a newer message
- * arrives.
+ * <p>Search, highlighting, copying and saving map between the display and the raw message through
+ * {@link TextAlignment}. An untouched view therefore never rewrites the message, and an edit only
+ * changes the characters the user actually typed.
+ *
+ * <p>Formatting, splitting and document construction happen off the Event Dispatch Thread, so a
+ * large message never blocks the panel while it is prepared.
  */
 public class PrettifyHttpPanelView
         implements HttpPanelView, HttpPanelViewModelListener, SearchableHttpPanelView {
 
     private static final Logger LOGGER = LogManager.getLogger(PrettifyHttpPanelView.class);
+
+    /** Name used by ZAP's message menu container. */
+    private static final String MESSAGE_CONTAINER_NAME = "HttpMessagePanel";
+
+    /** How long a resize is allowed to settle before the text is split for the new width. */
+    private static final int RESPLIT_DELAY_MS = 200;
 
     /** Which part of an HTTP message this view shows. */
     public enum Target {
@@ -77,14 +89,34 @@ public class PrettifyHttpPanelView
     private final PrettifyTextArea textArea;
     private final RTextScrollPane scrollPane;
 
-    /** Current display/original offset mapping; null until the first document is installed. */
-    private DisplayTextSplitter.Split split;
-
     /** Incremented on every request; stale background results are dropped against it. */
     private volatile long generation;
 
+    /** Whether the panel this view is mounted in allows the message to be edited. */
+    private volatile boolean editable;
+
+    /** Whether the user changed the displayed text since it was loaded or last saved. */
+    private volatile boolean changed;
+
+    /** The raw message text the current document was built from. */
+    private volatile String rawText = "";
+
+    /** The exact formatted text installed in the document, including the wrap breaks. */
+    private volatile String displaySource = "";
+
     /** Wrap width (in pixels) the current document was split for; -1 means "unknown". */
     private volatile int wrappedWidthPx = -1;
+
+    /**
+     * Re-splits spent on correcting the wrap width after a document was laid out. A layout can hand
+     * the view less room than the viewport extent suggests (the viewport is sized before the gutter
+     * and the scrollbar settle), which would leave the rows short of the right edge. Bounded so a
+     * scrollbar appearing/disappearing cannot make the two widths trade places forever.
+     */
+    private int widthCorrections;
+
+    /** Debounces re-splitting while the panel is being resized. */
+    private Timer resplitTimer;
 
     /** Width of one digit in the gutter font, or -1 until measured. */
     private int gutterDigitWidth = -1;
@@ -100,40 +132,17 @@ public class PrettifyHttpPanelView
     /** Line-number digits of the installed document, used to calibrate {@link #gutterFixedWidth}. */
     private int installedDigits = -1;
 
-    /**
-     * Re-splits spent on correcting the wrap width after a document was laid out. A layout can
-     * hand the view less room than the viewport extent suggests (the viewport is sized before the
-     * gutter and the scrollbar settle), which would leave the rows short of the right edge. Bounded
-     * so a scrollbar appearing/disappearing cannot make the two widths trade places forever.
-     */
-    private int widthCorrections;
+    /** Where the caret should be restored after a re-render, counted in non-whitespace characters. */
+    private int pendingCaretCount = -1;
 
-    /** Debounces re-splitting while the panel is being resized. */
-    private Timer resplitTimer;
+    /** Scrollbar position to restore after a re-render; -1 when the view should stay at the top. */
+    private int pendingScrollValue = -1;
 
-    /** Whether the panel this view is mounted in allows the message to be edited. */
-    private volatile boolean editable;
+    /** Guards against re-entering {@link #dataChanged} while a save is being applied. */
+    private boolean saving;
 
-    /** Whether the user changed the displayed text since it was loaded or last saved. */
-    private boolean changed;
-
-    /** Caret offset to restore once the view has been re-rendered after a save. */
-    private int pendingCaretOffset = -1;
-
-    /**
-     * Start offsets of the rows the gutter numbers (the rows that are a line of the message).
-     * Kept while the user edits, so the numbering follows the text as it is typed.
-     */
-    private int[] numberedOffsets = new int[0];
-
-    /**
-     * Start offsets of the rows the gutter leaves blank: the rows a wrapped line continues in and
-     * the rows the pretty printer added.
-     */
-    private int[] blankOffsets = new int[0];
-
-    /** The display text the row offsets above belong to. */
-    private String gutterRowsText = "";
+    /** Guards against re-entering {@link #dataChanged} while ZAP's body fix-up is applied. */
+    private boolean adjustingBody;
 
     /**
      * The request body the view last showed. ZAP moves the body into the query string when the
@@ -147,6 +156,11 @@ public class PrettifyHttpPanelView
     private String lastShownMethod = "";
 
     private String configurationKey = "";
+
+    /** The per-code-point widths of the last font, so a resize does not re-measure the font. */
+    private Font charWidthsFont;
+
+    private DisplayTextSplitter.CharWidths charWidths;
 
     public PrettifyHttpPanelView(
             String name,
@@ -164,12 +178,15 @@ public class PrettifyHttpPanelView
         this.textArea = new PrettifyTextArea(DisplayUtils.isDarkLookAndFeel());
         this.scrollPane = new RTextScrollPane(textArea, true);
         applyGutterTheme();
+        textArea.addThemeListener(this::applyGutterTheme);
         // The text is pre-wrapped to fit the viewport, so a horizontal scrollbar could never reveal
         // anything: its thumb would always span the full track. Disable it so the wrap appears
         // contained instead of showing a redundant bar.
-        this.scrollPane.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        this.scrollPane.setHorizontalScrollBarPolicy(
+                ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
         this.mainPanel.add(scrollPane, BorderLayout.CENTER);
-        this.textArea.addComponentListener(
+        textArea.setComponentPopupMenu(new CustomPopupMenu());
+        textArea.addComponentListener(
                 new ComponentAdapter() {
                     @Override
                     public void componentResized(ComponentEvent e) {
@@ -183,7 +200,7 @@ public class PrettifyHttpPanelView
                 });
         // The text area does not resize when the vertical scrollbar appears/disappears (its width
         // follows the content), but the viewport does. Watch the viewport so the wrap width tracks
-        // the real drawable width and no horizontal scrollbar is produced.
+        // the real drawable width.
         this.scrollPane
                 .getViewport()
                 .addComponentListener(
@@ -209,40 +226,106 @@ public class PrettifyHttpPanelView
         gutter.setBorderColor(theme.getLineNumbers());
     }
 
+    /** Re-renders the current message, starting at the top. */
     private void update() {
+        pendingCaretCount = -1;
+        pendingScrollValue = -1;
         widthCorrections = 0;
-        int widthPx = predictedWrapWidthPx();
-        update(widthPx > 0 ? widthPx : wrapMaxWidthPx());
+        updateInternal();
     }
 
-    /**
-     * Starts a background split for {@code widthPx}. The width usually comes from the viewport, but
-     * a layout can hand the text area less room than the viewport suggests; {@link #install} then
-     * corrects it from the width the text area really has.
-     */
-    private void update(final int widthPx) {
+    /** Re-renders the current message and restores the caret and scroll position afterwards. */
+    private void resplit() {
+        capturePosition();
+        updateInternal();
+    }
+
+    /** Remembers the caret and scroll position in the text that is about to be replaced. */
+    private void capturePosition() {
+        pendingCaretCount =
+                TextAlignment.nonWhitespaceBefore(textArea.getText(), textArea.getCaretPosition());
+        pendingScrollValue = scrollPane.getVerticalScrollBar().getValue();
+    }
+
+    private void updateInternal() {
         Message message = model.getMessage();
-        final String data = model.getData();
+        String data = model.getData();
+        if (data == null) {
+            data = "";
+        }
+        final String raw = data;
         final String contentType = contentTypeOf(message);
         final boolean stripTrailing = shouldStripTrailingNewlines(message);
+        // The gutter keeps the original message line numbers, so it aligns with the text before
+        // the pretty printer reflows it.
+        final String numbering = stripTrailing ? stripTrailingNewlines(raw) : raw;
+        // Prefer the width predicted for the gutter this message will need: the currently
+        // laid-out text area still reserves the previous message's gutter, which can be a digit
+        // narrower or wider.
+        final int predictedWidthPx = predictedWrapWidthPx();
+        final int widthPx = predictedWidthPx > 0 ? predictedWidthPx : currentWrapWidthPx();
         final long gen = ++generation;
         wrappedWidthPx = widthPx;
+        final DisplayTextSplitter.CharWidths widths = charWidths();
 
         PrettifyExecutor.get()
                 .submit(
                         () -> {
-                            String text = data;
-                            String numbering = data;
-                            if (data != null) {
-                                text = format(data, contentType, stripTrailing);
-                                // The gutter keeps the original message line numbers: pass the text
-                                // as it is without formatting (only the header-block cleanup) so
-                                // reformat-inserted lines are not numbered.
-                                numbering = stripTrailing ? stripTrailingNewlines(data) : data;
+                            String display = projection(raw, contentType, stripTrailing);
+                            String style = styleFor(contentType, display);
+                            DisplayTextSplitter.Split split =
+                                    editable
+                                            ? new DisplayTextSplitter.Split(
+                                                    display, display, new int[0], numbering)
+                                            : DisplayTextSplitter.split(
+                                                    display, numbering, style, widthPx, widths);
+                            int[] lineNumbers =
+                                    LineNumbers.forDisplay(numbering, split.displayText());
+                            int maxLineNumber = 1;
+                            for (int lineNumber : lineNumbers) {
+                                if (lineNumber > maxLineNumber) {
+                                    maxLineNumber = lineNumber;
+                                }
                             }
-                            prepareAndInstall(
-                                    text, numbering, styleFor(contentType, text), widthPx, gen);
+                            RSyntaxDocument document =
+                                    ChunkedTextLoader.buildDocument(
+                                            split.displayText(),
+                                            style,
+                                            split,
+                                            () -> gen != generation,
+                                            editable);
+                            if (document == null) {
+                                return;
+                            }
+                            final int installedLineCount = maxLineNumber;
+                            SwingUtilities.invokeLater(
+                                    () -> {
+                                        if (gen != generation) {
+                                            return;
+                                        }
+                                        install(
+                                                raw,
+                                                split,
+                                                lineNumbers,
+                                                installedLineCount,
+                                                document,
+                                                gen);
+                                    });
                         });
+    }
+
+    /**
+     * The text to show. Pretty-printing is whitespace-only; if a formatter ever changes a
+     * non-whitespace character the raw text is shown instead, which keeps every offset mapping
+     * exact. There is no size cutoff: formatting runs off the EDT.
+     */
+    private String projection(String raw, String contentType, boolean stripTrailing) {
+        String text = format(raw, contentType, stripTrailing);
+        if (!TextAlignment.sameNonWhitespace(raw, text)) {
+            LOGGER.debug("Formatter changed non-whitespace; showing the raw message instead.");
+            text = stripTrailing ? stripTrailingNewlines(raw) : raw;
+        }
+        return text;
     }
 
     /**
@@ -254,76 +337,40 @@ public class PrettifyHttpPanelView
         switch (target) {
             case REQUEST_ALL:
             case RESPONSE_ALL:
-                return PrettyPrint.formatMessageFor(contentType, text, reformatBody(contentType, text));
+                return PrettyPrint.formatMessageFor(contentType, text, true);
             case REQUEST_BODY:
             case RESPONSE_BODY:
-                return reformatBody(contentType, text)
-                        ? PrettyPrint.formatBody(ContentType.styleKeyFor(contentType, text), text)
-                        : text;
+                return PrettyPrint.formatBody(ContentType.styleKeyFor(contentType, text), text);
             default:
                 return stripTrailing ? stripTrailingNewlines(text) : text;
         }
     }
 
-    /**
-     * Whether the body may be re-formatted. A form body is not: the formatted form puts every
-     * parameter on its own line and drops the separators, which would change the body that is sent.
-     */
-    private boolean reformatBody(String contentType, String text) {
-        if (!editable) {
-            return true;
-        }
-        String body = bodyOf(text);
-        if (body == null) {
-            return true;
-        }
-        return !ContentType.FORM_STYLE.equals(ContentType.styleKeyFor(contentType, body));
-    }
-
-    /**
-     * Off the EDT: pre-breaks the text at the wrap width, then builds the syntax document in slices
-     * (see {@link ChunkedTextLoader}) so the UI thread never tokenises a huge payload. The finished
-     * document is then installed on the EDT.
-     */
-    private void prepareAndInstall(
-            final String text,
-            final String numberingSource,
-            final String style,
-            int widthPx,
-            final long gen) {
-        final DisplayTextSplitter.Split prepared =
-                DisplayTextSplitter.split(text, numberingSource, style, widthPx, charWidths());
-        if (prepared == null) {
-            return;
-        }
-        wrappedWidthPx = widthPx;
-        final RSyntaxDocument document =
-                ChunkedTextLoader.buildDocument(
-                        prepared.displayText(), style, prepared, () -> gen != generation, editable);
-        if (document == null) {
-            return;
-        }
-        SwingUtilities.invokeLater(
-                () -> {
-                    if (gen != generation) {
-                        return;
-                    }
-                    install(prepared, document, gen);
-                });
-    }
-
     /** Swaps in the prepared document. Must run on the EDT. */
-    private void install(DisplayTextSplitter.Split newSplit, RSyntaxDocument document, long gen) {
-        split = newSplit;
-        ChunkedTextLoader.installDocument(textArea, document, textArea::discardAllEdits);
+    private void install(
+            String raw,
+            DisplayTextSplitter.Split split,
+            int[] lineNumbers,
+            int maxLineNumber,
+            RSyntaxDocument document,
+            long gen) {
+        rawText = raw;
+        displaySource = split.displayText();
+        ChunkedTextLoader.installDocument(
+                textArea,
+                document,
+                () -> {
+                    textArea.discardAllEdits();
+                    textArea.setMessageText(raw);
+                });
+        textArea.applyManagerHighlights();
+        applyLineNumbering(split, lineNumbers, maxLineNumber);
         trackUserEdits();
-        textArea.setSplit(newSplit);
-        captureGutterRows(newSplit);
-        applyLineNumbering(newSplit);
-        installedDigits = digits(newSplit.originalLineCount());
-        // The text the user sees is the text we installed, so any earlier edit is gone.
+        installedDigits = digits(maxLineNumber);
+        // The document is the message as it was loaded, so an earlier edit is gone.
         changed = false;
         restoreCaret();
+        restoreScroll();
         rememberBody();
         // The document is laid out once the pending revalidation has run; only then does the text
         // area report the width it can really paint in.
@@ -352,13 +399,17 @@ public class PrettifyHttpPanelView
                     @Override
                     public void insertUpdate(DocumentEvent e) {
                         changed = true;
-                        textEdited(e.getOffset(), 0, e.getLength());
+                        if (editable) {
+                            updateEditableNumbering();
+                        }
                     }
 
                     @Override
                     public void removeUpdate(DocumentEvent e) {
                         changed = true;
-                        textEdited(e.getOffset(), e.getLength(), 0);
+                        if (editable) {
+                            updateEditableNumbering();
+                        }
                     }
 
                     @Override
@@ -370,17 +421,89 @@ public class PrettifyHttpPanelView
 
     /** Puts the caret back where the user left it after the view was re-rendered. */
     private void restoreCaret() {
-        if (pendingCaretOffset < 0) {
+        if (pendingCaretCount < 0) {
             return;
         }
-        int offset = pendingCaretOffset;
-        pendingCaretOffset = -1;
+        int count = pendingCaretCount;
+        pendingCaretCount = -1;
         try {
-            int length = textArea.getDocument().getLength();
-            textArea.setCaretPosition(Math.min(offset, length));
+            int offset = TextAlignment.offsetAfterNonWhitespace(textArea.getText(), count);
+            textArea.setCaretPosition(Math.min(offset, textArea.getDocument().getLength()));
         } catch (Exception ignored) {
-            // The document shrank; leave the caret where it is.
+            // The document changed; leave the caret where it is.
         }
+    }
+
+    /** Puts the scrollbar back after the view was re-rendered for the same message. */
+    private void restoreScroll() {
+        if (pendingScrollValue < 0) {
+            return;
+        }
+        int value = pendingScrollValue;
+        pendingScrollValue = -1;
+        SwingUtilities.invokeLater(
+                () -> {
+                    try {
+                        scrollPane.getVerticalScrollBar().setValue(value);
+                    } catch (RuntimeException ignored) {
+                        // The view was removed; nothing to restore.
+                    }
+                });
+    }
+
+    /**
+     * Numbers the displayed lines with the message's own line numbers. While the view is editable
+     * the numbers follow the logical lines as they are typed; a read-only view keeps the raw
+     * message numbers, with formatter-inserted lines left blank.
+     */
+    private void applyLineNumbering(
+            DisplayTextSplitter.Split split, int[] lineNumbers, int maxLineNumber) {
+        Gutter gutter = scrollPane.getGutter();
+        if (gutter == null) {
+            return;
+        }
+        try {
+            if (editable) {
+                updateEditableNumbering();
+            } else {
+                gutter.setLineNumberFormatter(
+                        new PrettifyLineNumberFormatter(lineNumbers, maxLineNumber));
+            }
+        } catch (Exception ignored) {
+            // Gutter not available (e.g. line numbers disabled) - keep the default numbering.
+        }
+    }
+
+    /**
+     * Numbers the non-blank rows of the text being edited, so the gutter keeps following the
+     * message's logical lines while the user types. Formatter-inserted blank rows stay unnumbered.
+     */
+    private void updateEditableNumbering() {
+        Gutter gutter = scrollPane.getGutter();
+        if (gutter == null) {
+            return;
+        }
+        String text = textArea.getText();
+        int lines = TextAlignment.countLines(text);
+        int[] numbers = new int[lines];
+        int number = 0;
+        int start = 0;
+        for (int i = 0; i < lines; i++) {
+            int end = text.indexOf('\n', start);
+            if (end < 0) {
+                end = text.length();
+            }
+            boolean blank = true;
+            for (int j = start; j < end; j++) {
+                if (!Character.isWhitespace(text.charAt(j))) {
+                    blank = false;
+                    break;
+                }
+            }
+            numbers[i] = blank ? 0 : ++number;
+            start = end + 1;
+        }
+        gutter.setLineNumberFormatter(new PrettifyLineNumberFormatter(numbers, number));
     }
 
     /**
@@ -488,22 +611,19 @@ public class PrettifyHttpPanelView
      * characters unused at the right edge.
      */
     private void correctWrapWidth(long gen) {
-        if (editable || gen != generation || widthCorrections >= 2 || wrappedWidthPx <= 0 || changed) {
+        if (editable || gen != generation || widthCorrections >= 2 || changed) {
             return;
         }
         int widthPx = drawableWidthPx();
         if (widthPx <= 0) {
             return;
         }
-        int target = widthPx;
-        int advance = Math.max(1, textArea.getFontMetrics(textArea.getFont()).charWidth('M'));
-        // Ignore sub-character differences (rounding), but both a gap of a whole character and a
-        // row that paints past the visible edge are worth one more split.
-        if (target - wrappedWidthPx < advance && wrappedWidthPx - target < 2 * advance) {
+        int advance = charAdvance();
+        if (wrappedWidthPx > 0 && Math.abs(widthPx - wrappedWidthPx) < advance) {
             return;
         }
         widthCorrections++;
-        update(target);
+        resplit();
     }
 
     /**
@@ -533,196 +653,7 @@ public class PrettifyHttpPanelView
         return Math.max(0, width);
     }
 
-    /**
-     * Notes which rows the gutter numbers and which it leaves blank. The rows are found by their
-     * offset in the text, so they can be followed when the user edits the text.
-     */
-    private void captureGutterRows(DisplayTextSplitter.Split newSplit) {
-        if (!editable) {
-            numberedOffsets = new int[0];
-            blankOffsets = new int[0];
-            gutterRowsText = "";
-            return;
-        }
-        String displayText = newSplit.displayText();
-        if (displayText.equals(gutterRowsText)) {
-            // The text did not change, so the rows are the ones that are already known.
-            return;
-        }
-        int[] numbers = newSplit.displayLineNumbers();
-        int[] starts = rowStarts(displayText);
-        int count = Math.min(numbers.length, starts.length);
-        int numbered = 0;
-        int blank = 0;
-        for (int i = 0; i < count; i++) {
-            if (numbers[i] > 0) {
-                numbered++;
-            } else {
-                blank++;
-            }
-        }
-        numberedOffsets = new int[numbered];
-        blankOffsets = new int[blank];
-        int at = 0;
-        int blankAt = 0;
-        for (int i = 0; i < count; i++) {
-            if (numbers[i] > 0) {
-                numberedOffsets[at++] = starts[i];
-            } else {
-                blankOffsets[blankAt++] = starts[i];
-            }
-        }
-        gutterRowsText = displayText;
-    }
-
-    /**
-     * Follows an edit made in the text area: the rows after it move, and the numbering is brought
-     * up to date so the lines the user added are numbered like the ones that were there before.
-     */
-    private void textEdited(int offset, int removed, int inserted) {
-        if (!editable) {
-            return;
-        }
-        // The rows the edit creates are part of the row they were typed in, so they are numbered
-        // like it.
-        int[] created = inserted > 0 ? createdRowStarts(offset, inserted) : new int[0];
-        boolean blank = isBlankRow(rowStartAt(offset));
-        numberedOffsets =
-                DisplayTextSplitter.shiftOffsets(numberedOffsets, offset, removed, inserted);
-        blankOffsets = DisplayTextSplitter.shiftOffsets(blankOffsets, offset, removed, inserted);
-        if (blank) {
-            for (int start : created) {
-                blankOffsets = insertOffset(blankOffsets, start);
-            }
-        }
-        updateEditableNumbering();
-    }
-
-    /** Start offsets of the rows the inserted text created. */
-    private int[] createdRowStarts(int offset, int inserted) {
-        Document document = textArea.getDocument();
-        String text;
-        try {
-            text = document.getText(offset, inserted);
-        } catch (Exception e) {
-            return new int[0];
-        }
-        int rows = 0;
-        for (int i = 0; i < text.length(); i++) {
-            if (text.charAt(i) == '\n') {
-                rows++;
-            }
-        }
-        int[] starts = new int[rows];
-        int at = 0;
-        for (int i = 0; i < text.length(); i++) {
-            if (text.charAt(i) == '\n') {
-                starts[at++] = offset + i + 1;
-            }
-        }
-        return starts;
-    }
-
-    /** Start offset of the row the given offset is in. */
-    private int rowStartAt(int offset) {
-        String text = textArea.getText();
-        int start = Math.min(offset, text.length());
-        while (start > 0 && text.charAt(start - 1) != '\n') {
-            start--;
-        }
-        return start;
-    }
-
-    /** Adds an offset to a sorted list of offsets. */
-    private static int[] insertOffset(int[] offsets, int offset) {
-        int[] grown = new int[offsets.length + 1];
-        int at = 0;
-        while (at < offsets.length && offsets[at] < offset) {
-            grown[at] = offsets[at];
-            at++;
-        }
-        grown[at] = offset;
-        System.arraycopy(offsets, at, grown, at + 1, offsets.length - at);
-        return grown;
-    }
-
-    /** Start offsets of the rows of {@code text}. */
-    private static int[] rowStarts(String text) {
-        int rows = 1;
-        for (int i = 0; i < text.length(); i++) {
-            if (text.charAt(i) == '\n') {
-                rows++;
-            }
-        }
-        int[] starts = new int[rows];
-        int row = 0;
-        starts[0] = 0;
-        for (int i = 0; i < text.length(); i++) {
-            if (text.charAt(i) == '\n') {
-                row++;
-                starts[row] = i + 1;
-            }
-        }
-        return starts;
-    }
-
-    /**
-     * Numbers the rows the gutter numbers and leaves the rest blank. The numbers are the ones of
-     * the message, so they follow the text while it is edited and do not change when the message
-     * is sent.
-     */
-    private void updateEditableNumbering() {
-        Gutter gutter = scrollPane.getGutter();
-        if (gutter == null) {
-            return;
-        }
-        int[] starts = rowStarts(textArea.getText());
-        int[] numbers = new int[starts.length];
-        int number = 0;
-        for (int i = 0; i < starts.length; i++) {
-            numbers[i] = isBlankRow(starts[i]) ? 0 : ++number;
-        }
-        try {
-            gutter.setLineNumberFormatter(new PrettifyLineNumberFormatter(numbers, number));
-        } catch (Exception ignored) {
-            // Gutter not available (e.g. line numbers disabled) - keep the default numbering.
-        }
-    }
-
-    /** Whether the row starting at {@code offset} is one the gutter leaves blank. */
-    private boolean isBlankRow(int offset) {
-        return java.util.Arrays.binarySearch(blankOffsets, offset) >= 0;
-    }
-
-    /**
-     * Numbers only the rows that start a real message line; the rows produced by our breaks (and
-     * any soft-wrapped continuation rows) are left blank.
-     */
-    private void applyLineNumbering(DisplayTextSplitter.Split newSplit) {
-        if (editable) {
-            // The numbering follows the text the user is editing, not the message it came from.
-            updateEditableNumbering();
-            return;
-        }
-        try {
-            Gutter gutter = scrollPane.getGutter();
-            if (gutter == null) {
-                return;
-            }
-            gutter.setLineNumberFormatter(
-                    new PrettifyLineNumberFormatter(
-                            newSplit.displayLineNumbers(), newSplit.originalLineCount()));
-        } catch (Exception ignored) {
-            // Gutter not available (e.g. line numbers disabled) - keep the default numbering.
-        }
-    }
-
     /** Width in pixels that a wrapped row may use, or 0 if the width is not known yet. */
-    private int wrapMaxWidthPx() {
-        return wrapWidthPx();
-    }
-
-    /** Width, in pixels, that a wrapped row may use, or 0 if the width is not known yet. */
     private int wrapWidthPx() {
         // The viewport extent already excludes the vertical scrollbar when it is shown, so no
         // scrollbar width is reserved; using the extent directly fills the row.
@@ -744,14 +675,32 @@ public class PrettifyHttpPanelView
         return Math.max(0, width);
     }
 
+    /** Wrap width measured from the laid-out text area, falling back to the viewport. */
+    private int currentWrapWidthPx() {
+        int widthPx = drawableWidthPx();
+        return widthPx > 0 ? widthPx : wrapWidthPx();
+    }
+
+    /** The width of one character of the message font, at least one pixel. */
+    private int charAdvance() {
+        Font font = textArea.getFont();
+        if (font == null) {
+            return 1;
+        }
+        return Math.max(1, textArea.getFontMetrics(font).charWidth('M'));
+    }
+
     /**
      * Per-code-point rendered widths for the wrap. Characters the font does not have a monospaced
      * glyph for (binary bodies, control pictures, CJK fallback, ...) are wider than {@code 'M'}, so
      * wrapping by character count would overflow the viewport; the splitter wraps by these measured
-     * widths instead.
+     * widths instead. Cached for the current font, because a resize asks for the same widths again.
      */
     private DisplayTextSplitter.CharWidths charWidths() {
         final Font font = textArea.getFont();
+        if (font != null && font == charWidthsFont && charWidths != null) {
+            return charWidths;
+        }
         // RSTA paints with fractional font metrics enabled (see PrettifyTextArea), so the advance
         // per character is the fractional one, which can differ from the rounded FontMetrics
         // charWidth() by a noticeable fraction. Measure with the same fractional context the
@@ -764,32 +713,44 @@ public class PrettifyHttpPanelView
         final double tabWidth =
                 (monospaceAdvance > 0 ? monospaceAdvance : metrics.charWidth(' '))
                         * PrettifyTextArea.TAB_SIZE;
-        return new DisplayTextSplitter.CharWidths() {
-            private final double[] cache = new double[0x10000];
-            private final java.util.HashMap<Integer, Double> wide =
-                    new java.util.HashMap<>();
+        DisplayTextSplitter.CharWidths measured =
+                new DisplayTextSplitter.CharWidths() {
+                    private final double[] cache = new double[0x10000];
+                    private final java.util.HashMap<Integer, Double> wide =
+                            new java.util.HashMap<>();
 
-            @Override
-            public double widthOf(int codePoint) {
-                if (codePoint == '\t') {
-                    return tabWidth;
-                }
-                if (codePoint >= 0 && codePoint < 0x10000) {
-                    double w = cache[codePoint];
-                    if (w <= 0) {
-                        w = measuredWidth(codePoint, font, frc, metrics, monospaceAdvance);
-                        cache[codePoint] = w;
+                    @Override
+                    public double widthOf(int codePoint) {
+                        if (codePoint == '\t') {
+                            return tabWidth;
+                        }
+                        if (codePoint >= 0 && codePoint < 0x10000) {
+                            double w = cache[codePoint];
+                            if (w <= 0) {
+                                w =
+                                        measuredWidth(
+                                                codePoint,
+                                                font,
+                                                frc,
+                                                metrics,
+                                                monospaceAdvance);
+                                cache[codePoint] = w;
+                            }
+                            return w;
+                        }
+                        Double w = wide.get(codePoint);
+                        if (w == null) {
+                            w =
+                                    measuredWidth(
+                                            codePoint, font, frc, metrics, monospaceAdvance);
+                            wide.put(codePoint, w);
+                        }
+                        return w;
                     }
-                    return w;
-                }
-                Double w = wide.get(codePoint);
-                if (w == null) {
-                    w = measuredWidth(codePoint, font, frc, metrics, monospaceAdvance);
-                    wide.put(codePoint, w);
-                }
-                return w;
-            }
-        };
+                };
+        charWidthsFont = font;
+        charWidths = measured;
+        return measured;
     }
 
     /**
@@ -806,7 +767,10 @@ public class PrettifyHttpPanelView
     }
 
     private static double measuredWidth(
-            int codePoint, Font font, FontRenderContext frc, FontMetrics metrics,
+            int codePoint,
+            Font font,
+            FontRenderContext frc,
+            FontMetrics metrics,
             double monospaceAdvance) {
         if (monospaceAdvance > 0
                 && font.canDisplay(codePoint)
@@ -816,32 +780,34 @@ public class PrettifyHttpPanelView
         return font.getStringBounds(new String(Character.toChars(codePoint)), frc).getWidth();
     }
 
+    /**
+     * Re-splits when the panel has really changed width. The delay keeps a drag from starting a
+     * split per pixel, and a change smaller than one character is ignored because it cannot move a
+     * break.
+     */
     private void resplitIfWidthChanged() {
         if (editable || changed) {
             // The user is editing: re-splitting would replace the text they are working on.
             return;
         }
         int widthPx = currentWrapWidthPx();
-        if (widthPx <= 0 || widthPx == wrappedWidthPx) {
+        if (widthPx <= 0) {
+            return;
+        }
+        if (wrappedWidthPx > 0 && Math.abs(widthPx - wrappedWidthPx) < charAdvance()) {
             return;
         }
         if (resplitTimer == null) {
             resplitTimer =
                     new Timer(
-                            150,
+                            RESPLIT_DELAY_MS,
                             e -> {
                                 widthCorrections = 0;
-                                update(currentWrapWidthPx());
+                                resplit();
                             });
             resplitTimer.setRepeats(false);
         }
         resplitTimer.restart();
-    }
-
-    /** Wrap width measured from the laid-out text area, falling back to the viewport. */
-    private int currentWrapWidthPx() {
-        int widthPx = drawableWidthPx();
-        return widthPx > 0 ? widthPx : wrapMaxWidthPx();
     }
 
     /** Syntax highlighting is always applied, based on the fixed style or the content type. */
@@ -949,32 +915,39 @@ public class PrettifyHttpPanelView
 
     @Override
     public void save() {
-        // What is shown is what is sent: the body stays formatted, as the view shows it.
-        String text = messageText();
-        try {
-            model.setData(text);
-        } catch (RuntimeException e) {
-            LOGGER.warn("Could not save the edited message.", e);
+        if (!changed) {
+            // Nothing was edited: never rewrite the message with the formatter's whitespace.
             return;
         }
+        String edited = textArea.getText();
+        String raw = rawText;
+        String display = displaySource;
+        String newRaw = TextAlignment.applyEditToRaw(raw, display, edited);
+        if (newRaw == null) {
+            newRaw = edited;
+        }
+        boolean messageChanged = !newRaw.equals(raw);
+        if (messageChanged) {
+            saving = true;
+            try {
+                model.setData(newRaw);
+            } catch (RuntimeException e) {
+                LOGGER.warn("Could not save the edited message.", e);
+                return;
+            } finally {
+                saving = false;
+            }
+        }
         changed = false;
+        rawText = newRaw;
+        displaySource = edited;
         rememberBody();
         // The body is in the message now, so the request can be given the content type it has.
         setContentTypeIfMissing();
-        // The message now holds the text the user typed, so the view is rendered again from it;
-        // that also rebuilds the wrap breaks, so a further edit is unwrapped correctly.
-        pendingCaretOffset = textArea.getCaretPosition();
-        update();
-    }
-
-    /** The edited text with the wrap breaks the split inserted taken out again. */
-    private String messageText() {
-        String edited = textArea.getText();
-        DisplayTextSplitter.Split activeSplit = split;
-        if (activeSplit == null) {
-            return edited;
-        }
-        return activeSplit.toMessageText(edited);
+        pendingCaretCount =
+                TextAlignment.nonWhitespaceBefore(edited, textArea.getCaretPosition());
+        pendingScrollValue = scrollPane.getVerticalScrollBar().getValue();
+        updateInternal();
     }
 
     @Override
@@ -989,9 +962,7 @@ public class PrettifyHttpPanelView
 
     @Override
     public boolean hasChanged() {
-        // The view always shows the message in its formatted form, so saving it always writes that
-        // form back - the same as the core text view, which also always saves what it shows.
-        return true;
+        return changed;
     }
 
     @Override
@@ -1006,22 +977,31 @@ public class PrettifyHttpPanelView
         }
         this.editable = editable;
         textArea.setEditable(editable);
-        // The rows of a view that is only read are broken up to the width of the viewport; an
-        // editable view is wrapped by the text area, which re-wraps what the user types.
-        textArea.setLineWrap(editable);
+        applyWrapPolicy();
         if (!editable) {
             // A view that cannot be edited must not carry changes into the message.
             changed = false;
+            textArea.discardAllEdits();
         }
-        if (!changed && model.getMessage() != null) {
+        if (model.getMessage() != null) {
             // The request may carry a body that says what it is; the header is filled in before
-            // the view is rendered, so that it is shown with the content type.
+            // the view is rendered, so that it is shown with the content type. The rendering mode
+            // also depends on whether the view is editable.
             setContentTypeIfMissing();
-            // The document of an editable view is a plain one (the wrapped rows of a read-only
-            // document carry the tokens of the unwrapped text, which an edit would invalidate), so
-            // the view is rendered again to get the right kind of document.
             update();
         }
+    }
+
+    /**
+     * Keeps the horizontal scrollbar out of the way: pre-split rows fit the viewport, and an
+     * editable view wraps them. It is only useful when word wrap is turned off while editing.
+     */
+    private void applyWrapPolicy() {
+        boolean needed = editable && !textArea.getLineWrap();
+        scrollPane.setHorizontalScrollBarPolicy(
+                needed
+                        ? ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED
+                        : ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
     }
 
     @Override
@@ -1031,16 +1011,20 @@ public class PrettifyHttpPanelView
 
     @Override
     public void loadConfiguration(FileConfiguration fileConfiguration) {
-        // No configurable state.
+        textArea.loadConfiguration(configurationKey, fileConfiguration);
+        applyWrapPolicy();
     }
 
     @Override
     public void saveConfiguration(FileConfiguration fileConfiguration) {
-        // No configurable state.
+        textArea.saveConfiguration(configurationKey, fileConfiguration);
     }
 
     @Override
     public void dataChanged(HttpPanelViewModelEvent e) {
+        if (saving || adjustingBody) {
+            return;
+        }
         undoZapBodyChange();
         setContentTypeIfMissing();
         update();
@@ -1126,29 +1110,35 @@ public class PrettifyHttpPanelView
      * the way back, so the body that comes back is not the body that was there.
      */
     private void undoZapBodyChange() {
-        if (!editable) {
+        if (!editable || adjustingBody) {
             return;
         }
-        String data = model.getData();
-        String body = bodyOf(data);
-        String method = methodOf(data);
-        if (body != null && !body.isEmpty()) {
-            String remembered = lastShownBody;
-            boolean methodChanged = !method.equals(lastShownMethod);
-            if (!changed
-                    && !remembered.isEmpty()
-                    && !body.equals(remembered)
-                    && (methodChanged || body.equals(remembered + "="))) {
-                // ZAP moved the body into the query string and back again: the body it puts back is
-                // not the body that was there (it re-encodes a parameter without a value as
-                // "name=").
-                setBodyOf(data, remembered);
+        adjustingBody = true;
+        try {
+            String data = model.getData();
+            String body = bodyOf(data);
+            String method = methodOf(data);
+            if (body != null && !body.isEmpty()) {
+                String remembered = lastShownBody;
+                boolean methodChanged = !method.equals(lastShownMethod);
+                if (!changed
+                        && !remembered.isEmpty()
+                        && !body.equals(remembered)
+                        && (methodChanged || body.equals(remembered + "="))) {
+                    // ZAP moved the body into the query string and back again: the body it puts
+                    // back is not the body that was there (it re-encodes a parameter without a
+                    // value as "name=").
+                    setBodyOf(data, remembered);
+                    data = model.getData();
+                }
+                rememberBody();
             }
-            rememberBody();
+            // An empty body is not remembered: the body is empty while it is in the query string,
+            // and it is the body that was there before that has to be remembered.
+            lastShownMethod = method;
+        } finally {
+            adjustingBody = false;
         }
-        // An empty body is not remembered: the body is empty while it is in the query string, and
-        // it is the body that was there before that has to be remembered.
-        lastShownMethod = method;
     }
 
     /** The request method of the message, or an empty string when it is not a request. */
@@ -1207,58 +1197,185 @@ public class PrettifyHttpPanelView
 
     @Override
     public void search(Pattern pattern, List<SearchMatch> matches) {
-        DisplayTextSplitter.Split activeSplit = split;
-        Matcher matcher = pattern.matcher(textArea.getText());
+        // The HTTP panel models normalise CRLF to LF, so the displayed text, the raw message and
+        // the search offsets all use LF. No header/body CRLF conversion is applied: converting the
+        // offsets back and forth was what added line endings the message never had.
+        String display = textArea.getText();
+        String raw = rawText;
+        if (raw == null) {
+            raw = model.getData();
+        }
+        if (raw == null) {
+            raw = display;
+        }
+        if (!TextAlignment.sameNonWhitespace(display, raw)) {
+            // The view is showing something that does not align with the raw message (for example
+            // while a new document is being prepared); report the matches as they are.
+            reportUnmappedMatches(pattern, display, matches);
+            return;
+        }
+        Matcher matcher = pattern.matcher(display);
         while (matcher.find()) {
-            int start = matcher.start();
-            int end = matcher.end();
-            if (activeSplit != null) {
-                start = activeSplit.toOriginalOffset(start);
-                end = activeSplit.toOriginalOffset(end);
-            }
-            if (start >= end) {
+            int start = TextAlignment.displayToRaw(display, raw, matcher.start());
+            int end = TextAlignment.displayToRawEnd(display, raw, matcher.end());
+            if (start < 0 || end < 0 || start >= end) {
                 continue;
             }
-            matches.add(new SearchMatch(location(), start, end));
+            SearchMatch.Location location = locationFor(raw, start);
+            if (location == null) {
+                continue;
+            }
+            boolean combined =
+                    target == Target.REQUEST_ALL || target == Target.RESPONSE_ALL;
+            if (isHeaderLocation(location)) {
+                int headerEnd = combined ? bodyStartInLf(raw) : raw.length();
+                int clampedEnd = Math.min(end, headerEnd);
+                matches.add(new SearchMatch(location, start, clampedEnd));
+            } else {
+                int bodyStart = combined ? bodyStartInLf(raw) : 0;
+                matches.add(
+                        new SearchMatch(location, start - bodyStart, end - bodyStart));
+            }
+        }
+    }
+
+    /** Fallback used only when the displayed text cannot be aligned with the raw message. */
+    private void reportUnmappedMatches(
+            Pattern pattern, String text, List<SearchMatch> matches) {
+        Matcher matcher = pattern.matcher(text);
+        SearchMatch.Location location = fixedLocation();
+        if (location == null) {
+            return;
+        }
+        while (matcher.find()) {
+            if (matcher.start() < matcher.end()) {
+                matches.add(new SearchMatch(location, matcher.start(), matcher.end()));
+            }
         }
     }
 
     @Override
     public void highlight(SearchMatch searchMatch) {
-        int start = searchMatch.getStart();
-        int end = searchMatch.getEnd();
-        DisplayTextSplitter.Split activeSplit = split;
-        if (activeSplit != null) {
-            start = activeSplit.toDisplayOffset(start);
-            end = activeSplit.toDisplayOffset(end);
-        }
-        int length = textArea.getDocument().getLength();
-        if (start < 0 || end > length || start >= end) {
+        if (searchMatch == null) {
             return;
         }
-        try {
-            Highlighter highlighter = textArea.getHighlighter();
-            highlighter.removeAllHighlights();
-            highlighter.addHighlight(
-                    start,
-                    end,
-                    new DefaultHighlighter.DefaultHighlightPainter(DisplayUtils.getHighlightColor()));
-            textArea.setCaretPosition(start);
-        } catch (Exception ignored) {
-            // Invalid offsets - nothing to highlight.
+        String raw = rawText;
+        String display = displaySource;
+        if (raw == null || display == null || raw.isEmpty() || display.isEmpty()) {
+            return;
+        }
+        int start = searchMatch.getStart();
+        int end = searchMatch.getEnd();
+        SearchMatch.Location location = searchMatch.getLocation();
+        int sourceStart;
+        int sourceEnd;
+        switch (location) {
+            case REQUEST_HEAD:
+            case RESPONSE_HEAD:
+                sourceStart = start;
+                sourceEnd = end;
+                break;
+            case REQUEST_BODY:
+            case RESPONSE_BODY:
+                sourceStart = start;
+                sourceEnd = end;
+                if (target == Target.REQUEST_ALL || target == Target.RESPONSE_ALL) {
+                    int bodyStart = bodyStartInLf(raw);
+                    sourceStart += bodyStart;
+                    sourceEnd += bodyStart;
+                }
+                break;
+            default:
+                return;
+        }
+        int displayStart = TextAlignment.rawToDisplay(raw, display, sourceStart);
+        int displayEnd = TextAlignment.rawToDisplayEnd(raw, display, sourceEnd);
+        if (displayStart < 0 || displayEnd < 0 || displayStart >= displayEnd) {
+            return;
+        }
+        int length = textArea.getDocument().getLength();
+        if (displayStart < 0 || displayEnd > length) {
+            return;
+        }
+        textArea.highlightRange(displayStart, displayEnd);
+    }
+
+    /** The location of a match that starts at {@code lfOffset} in the raw LF text. */
+    private SearchMatch.Location locationFor(String raw, int lfOffset) {
+        switch (target) {
+            case REQUEST_HEAD:
+                return SearchMatch.Location.REQUEST_HEAD;
+            case RESPONSE_HEAD:
+                return SearchMatch.Location.RESPONSE_HEAD;
+            case REQUEST_BODY:
+                return SearchMatch.Location.REQUEST_BODY;
+            case RESPONSE_BODY:
+                return SearchMatch.Location.RESPONSE_BODY;
+            case REQUEST_ALL:
+                return lfOffset < bodyStartInLf(raw)
+                        ? SearchMatch.Location.REQUEST_HEAD
+                        : SearchMatch.Location.REQUEST_BODY;
+            case RESPONSE_ALL:
+                return lfOffset < bodyStartInLf(raw)
+                        ? SearchMatch.Location.RESPONSE_HEAD
+                        : SearchMatch.Location.RESPONSE_BODY;
+            default:
+                return null;
         }
     }
 
-    private SearchMatch.Location location() {
+    /** The fixed location of a body/header-only view, or null for the combined views. */
+    private SearchMatch.Location fixedLocation() {
         switch (target) {
-            case REQUEST_BODY:
-                return SearchMatch.Location.REQUEST_BODY;
+            case REQUEST_HEAD:
+                return SearchMatch.Location.REQUEST_HEAD;
             case RESPONSE_HEAD:
                 return SearchMatch.Location.RESPONSE_HEAD;
+            case REQUEST_BODY:
+                return SearchMatch.Location.REQUEST_BODY;
             case RESPONSE_BODY:
                 return SearchMatch.Location.RESPONSE_BODY;
             default:
-                return SearchMatch.Location.REQUEST_HEAD;
+                return null;
+        }
+    }
+
+    private static boolean isHeaderLocation(SearchMatch.Location location) {
+        return location == SearchMatch.Location.REQUEST_HEAD
+                || location == SearchMatch.Location.RESPONSE_HEAD;
+    }
+
+    /** Offset of the first body character in the raw LF message, or the text length. */
+    static int bodyStartInLf(String raw) {
+        if (raw == null) {
+            return 0;
+        }
+        int separator = raw.indexOf("\n\n");
+        return separator < 0 ? raw.length() : separator + 2;
+    }
+
+    /** The ZAP message menu, with the standard text actions supplied by {@link PrettifyTextActions}. */
+    private final class CustomPopupMenu extends JPopupMenu {
+
+        private static final long serialVersionUID = 1L;
+
+        @Override
+        public void show(Component invoker, int x, int y) {
+            if (!textArea.isFocusOwner()) {
+                textArea.requestFocusInWindow();
+            }
+            Message message = model.getMessage();
+            View view = View.getSingleton();
+            if (message instanceof HttpMessage && view != null && view.getPopupMenu() != null) {
+                DefaultSingleHttpMessageContainer container =
+                        new DefaultSingleHttpMessageContainer(
+                                MESSAGE_CONTAINER_NAME, textArea, (HttpMessage) message);
+                view.getPopupMenu().show(container, x, y);
+            } else if (view != null && view.getPopupMenu() != null) {
+                view.getPopupMenu().show(textArea, x, y);
+            } else {
+                super.show(invoker, x, y);
+            }
         }
     }
 }

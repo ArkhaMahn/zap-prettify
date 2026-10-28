@@ -5,10 +5,9 @@ import org.fife.ui.rtextarea.LineNumberFormatter;
 /**
  * A gutter line-number formatter that shows a number only on rows that start a real message line.
  *
- * <p>The view pre-breaks overlong lines into several display lines (and the view may soft-wrap
- * them further). Those continuation rows must not be numbered, otherwise a single message line
- * appears as dozens of numbered rows. Only the first display line of each original message line
- * gets its number.
+ * <p>The view pre-splits overlong lines (and an editable view may soft-wrap them further). Those
+ * continuation rows must not be numbered, otherwise a single message line appears as dozens of
+ * numbered rows. Only the first display line of each original message line gets its number.
  */
 public final class PrettifyLineNumberFormatter implements LineNumberFormatter {
 

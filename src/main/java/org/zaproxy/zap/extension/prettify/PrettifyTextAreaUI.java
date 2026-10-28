@@ -5,7 +5,6 @@ import javax.swing.text.Element;
 import javax.swing.text.View;
 import org.fife.ui.rsyntaxtextarea.RSyntaxTextArea;
 import org.fife.ui.rsyntaxtextarea.RSyntaxTextAreaUI;
-import org.fife.ui.rsyntaxtextarea.SyntaxView;
 
 /**
  * The RSyntaxTextArea UI for {@link PrettifyTextArea}. Identical to {@link RSyntaxTextAreaUI}
@@ -24,6 +23,6 @@ public class PrettifyTextAreaUI extends RSyntaxTextAreaUI {
                 && ((RSyntaxTextArea) getRTextArea()).getLineWrap()) {
             return new PrettifyWrappedSyntaxView(elem);
         }
-        return new SyntaxView(elem);
+        return super.create(elem);
     }
 }

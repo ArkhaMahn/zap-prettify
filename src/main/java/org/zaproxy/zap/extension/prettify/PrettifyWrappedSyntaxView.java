@@ -38,16 +38,24 @@ public class PrettifyWrappedSyntaxView extends WrappedSyntaxView {
             // The width of a monospaced token is measured from the font, not from the painted
             // width: measuring the painted width walks the rest of the line for every row, which
             // makes wrapping a long line quadratic.
-            float tokenWidth =
-                    prettifyTextArea == null ? -1 : prettifyTextArea.widthOf(t.length());
+            float tokenWidth = prettifyTextArea == null ? -1 : prettifyTextArea.widthOf(t);
             if (tokenWidth < 0) {
                 tokenWidth = t.getWidth(textArea, this, x0);
             }
             if (tokenWidth > currentWidth) {
                 // Fill the row with as much of the token as fits instead of moving it wholesale.
-                int offset = prettifyTextArea == null ? -1 : prettifyTextArea.offsetBeforeX(t, currentWidth);
+                int offset =
+                        prettifyTextArea == null
+                                ? -1
+                                : prettifyTextArea.offsetBeforeX(t, currentWidth);
                 if (offset >= 0) {
-                    return offset;
+                    if (offset > t.getOffset()) {
+                        return offset;
+                    }
+                    // Not even one character fits. A token that starts the row must still consume
+                    // one character (otherwise the row would be empty and wrapping would never
+                    // finish); a later token simply moves to the next row.
+                    return p == p0 ? t.getOffset() + 1 : p;
                 }
                 return t.getOffsetBeforeX(textArea, this, 0.0f, currentWidth);
             }

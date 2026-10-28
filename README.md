@@ -1,18 +1,20 @@
 # Prettify for OWASP ZAP
 
-Prettify adds Burp-style, syntax-highlighted "Pretty" views to the OWASP ZAP HTTP request and response panels. It presents messages with beautiful syntax highlighting, smart line wrapping, and original-line numbering as additional tabs without replacing ZAP's core views.
+Prettify adds Burp-style, syntax-highlighted "Pretty" views to the OWASP ZAP HTTP request and response panels. It presents messages with beautiful syntax highlighting, viewport-width line splitting, and original-line numbering as additional tabs without replacing ZAP's core views.
 
 ## Features
 
 - **Additional tabs, no replacement** - Adds "Pretty" tabs for Request Split (Header/Body), Response Split (Header/Body), Request All, and Response All. The core Text view remains unchanged and fully functional.
-- **Syntax highlighting** - Always-on syntax highlighting powered by RSyntaxTextArea. Automatically detects and highlights HTTP, JSON, XML, HTML, JavaScript, CSS, and form data based on Content-Type.
-- **Burp-like theming** - Light and dark themes that automatically match ZAP's look and feel.
-- **Smart pretty-printing** - JSON, XML, and other structured content are prettified for better readability. Header-only views are cleaned up without affecting the underlying message structure.
-- **Pre-wrapped display** - Lines are pre-broken at the viewport width for fast rendering of large messages. Horizontal scrolling is disabled for a cleaner view. Wraps automatically adjust on panel resize.
-- **Original line numbering** - Only original message lines are numbered in the gutter; wrapped continuations and pretty-print-inserted lines are left blank, matching Burp's behavior.
-- **Editable support** - Pretty views can be edited in editable contexts (like the Requester). Edits are tracked, wrapped breaks are stripped on save, and line numbers follow your edits dynamically.
-- **Large message support** - Content is prepared off the EDT and rendered in chunks with generation-based cancellation to keep the UI responsive.
-- **Search integration** - Works with ZAP's search functionality, with proper offset mapping between wrapped display text and original message offsets.
+- **Syntax highlighting** - Always-on syntax highlighting powered by RSyntaxTextArea. Automatically detects and highlights HTTP, JSON, XML, HTML, JavaScript, CSS, and form data based on Content-Type, with a conservative body sniff for custom or missing types.
+- **Burp-like theming** - Light and dark themes that automatically match ZAP's look and feel, including live refreshes when the Look and Feel changes.
+- **Smart pretty-printing** - JSON, XML, HTML, CSS, JavaScript, TypeScript, and GraphQL are prettified for better readability, including when they arrive under a custom content type that has to be sniffed. Header-only views are cleaned up without affecting the underlying message structure. Form-encoded bodies are shown exactly as received, and binary or protobuf payloads are never formatted.
+- **Pre-split display** - Long lines are split into display rows at the calculated viewport width, so header values, URLs, and other unbroken runs fill each row. The breaks exist only in the display: the message itself is untouched, and rows are recalculated when the panel is resized.
+- **Original line numbering** - Only original message lines are numbered in the gutter; split continuations and pretty-print-inserted lines are left blank, matching Burp's behavior.
+- **Editable support** - Pretty views can be edited in editable contexts (like the Requester). Edits are applied back to the raw message through a non-whitespace alignment, so the original whitespace and line endings outside the changed range are preserved. Copying a selection yields the received text, not the formatter's projection. Line numbers follow your edits dynamically.
+- **Large message support** - Formatting and tokenization run off the EDT with generation-based cancellation and chunked document loading. There is no size cutoff for pretty-printing: large bodies are formatted like any other, with the work kept off the UI thread.
+- **Search integration** - Works with ZAP's search functionality, with offset mapping through the formatted projection back to the raw message offsets.
+- **ZAP highlights and text actions** - Participates in ZAP's `HighlighterManager`, so user-defined highlights are painted like in the core views, and offers the standard undo/redo/cut/copy/paste/delete/select-all actions in the message popup menu.
+- **Persisted view settings** - Word wrap, line numbers, anti-aliasing, current-line highlighting, whitespace/newline markers, and related editor options are saved per view and restored on restart.
 - **Smart body handling** - Handles ZAP's behavior of moving request bodies when changing HTTP methods, preserves form-encoded bodies when editing to avoid breaking structure, and can auto-detect and set Content-Type headers when missing.
 
 ## Requirements
@@ -76,7 +78,9 @@ build/zapAddOn/bin/Prettify-addon-1.0.0.zap
 
 ## Configuration
 
-Prettify has no configurable options at this time. It automatically adapts to your ZAP theme (light/dark) and panel sizes.
+Prettify adapts to your ZAP theme (light/dark) and panel sizes automatically. The standard editor options - word wrap, line numbers, anti-aliasing, current-line highlighting, whitespace and newline markers, occurrence marking, rounded selection, and bracket matching - are saved with the view configuration and restored on restart. Word wrap applies to editable views; read-only views are always split to the viewport width instead.
+
+There is no size cutoff for pretty-printing: a body is formatted whenever its type is recognised, however large. Binary and protobuf payloads are shown as received.
 
 ## Uninstallation
 
@@ -87,8 +91,9 @@ Prettify is fully cleanly unloadable. You can disable or uninstall it from `Tool
 - **Package**: `org.zaproxy.zap.extension.prettify`
 - **Extension Class**: `ExtensionPrettify`
 - **Views**: Implemented as `HttpPanelView` instances registered through `HttpPanelManager`
-- **Rendering**: Uses RSyntaxTextArea with custom token makers for HTTP protocol parsing
-- **Threading**: Heavy processing (formatting, wrapping, tokenization) happens off the EDT with chunked loading
+- **Rendering**: Uses RSyntaxTextArea with custom token makers for HTTP protocol parsing. Read-only views are pre-split into display rows at the measured viewport width, which keeps painting and scrolling on the fast non-wrapping layout path; editable views use normal word wrap.
+- **Threading**: Formatting and tokenization happen off the EDT with generation-based cancellation and chunked document loading; only the finished document is installed on the EDT
+- **Text mapping**: `TextAlignment` maps display offsets to raw-message offsets through non-whitespace alignment, so edits, search results, highlights, and clipboard copies refer to the received bytes
 
 ## License
 

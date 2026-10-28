@@ -47,7 +47,9 @@ public final class PrettyPrint {
                 case ContentType.GRAPHQL_STYLE:
                     return graphql(body);
                 case ContentType.FORM_STYLE:
-                    return form(body);
+                    // Form bodies are left exactly as they are: splitting the parameters across
+                    // lines is not worth a formatted projection of a body that is usually short.
+                    return body;
                 default:
                     return body;
             }
@@ -62,9 +64,7 @@ public final class PrettyPrint {
     }
 
     /**
-     * Formats the body of a full message, optionally leaving the body as it is. The body is left
-     * alone when its formatting would change what it means, which is the case for a form body: the
-     * formatted form puts every parameter on its own line and drops the separators.
+     * Formats the body of a full message, optionally leaving the body as it is.
      */
     public static String formatMessage(String bodyStyleKey, String message, boolean reformat) {
         if (message == null || bodyStyleKey == null) {
@@ -1187,32 +1187,6 @@ public final class PrettyPrint {
                 || kind == K_NAME
                 || kind == K_VALUE
                 || kind == K_CLOSE_PAREN;
-    }
-
-    // ---------------------------------------------------------------------
-    // application/x-www-form-urlencoded
-    // ---------------------------------------------------------------------
-
-    /** Puts each form parameter on its own line. Multipart bodies are left untouched. */
-    private static String form(String s) {
-        if (s == null || s.isEmpty() || s.trim().startsWith("--")) {
-            return s;
-        }
-        StringBuilder out = new StringBuilder(s.length() + 16);
-        int start = 0;
-        int n = s.length();
-        for (int i = 0; i <= n; i++) {
-            if (i == n || s.charAt(i) == '&') {
-                if (i > start) {
-                    if (out.length() > 0) {
-                        out.append('\n');
-                    }
-                    out.append(s, start, i);
-                }
-                start = i + 1;
-            }
-        }
-        return out.length() == 0 ? s : out.toString();
     }
 
     // ---------------------------------------------------------------------
