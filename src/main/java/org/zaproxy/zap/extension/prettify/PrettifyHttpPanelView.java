@@ -67,9 +67,6 @@ public class PrettifyHttpPanelView
     /** Name used by ZAP's message menu container. */
     private static final String MESSAGE_CONTAINER_NAME = "HttpMessagePanel";
 
-    /** How long a resize is allowed to settle before the text is split for the new width. */
-    private static final int RESPLIT_DELAY_MS = 200;
-
     /** Which part of an HTTP message this view shows. */
     public enum Target {
         REQUEST_HEAD,
@@ -114,9 +111,6 @@ public class PrettifyHttpPanelView
      * scrollbar appearing/disappearing cannot make the two widths trade places forever.
      */
     private int widthCorrections;
-
-    /** Debounces re-splitting while the panel is being resized. */
-    private Timer resplitTimer;
 
     /** Width of one digit in the gutter font, or -1 until measured. */
     private int gutterDigitWidth = -1;
@@ -176,6 +170,7 @@ public class PrettifyHttpPanelView
 
         this.mainPanel = new JPanel(new BorderLayout());
         this.textArea = new PrettifyTextArea(DisplayUtils.isDarkLookAndFeel());
+        this.textArea.setPasteFormatter(this::formatPastedText);
         this.scrollPane = new RTextScrollPane(textArea, true);
         applyGutterTheme();
         textArea.addThemeListener(this::applyGutterTheme);
@@ -236,7 +231,12 @@ public class PrettifyHttpPanelView
 
     /** Re-renders the current message and restores the caret and scroll position afterwards. */
     private void resplit() {
-        capturePosition();
+        // A resize drag can ask for many splits before one finishes. Capture the position once
+        // and let the following splits reuse it, so a drag does not scan the whole document per
+        // pixel.
+        if (pendingCaretCount < 0) {
+            capturePosition();
+        }
         updateInternal();
     }
 
@@ -271,7 +271,16 @@ public class PrettifyHttpPanelView
         PrettifyExecutor.get()
                 .submit(
                         () -> {
+                            // A resize can queue several splits. A superseded one returns before
+                            // doing any work, and the checks between the expensive steps stop one
+                            // that is already running as soon as a newer split arrives.
+                            if (gen != generation) {
+                                return;
+                            }
                             String display = projection(raw, contentType, stripTrailing);
+                            if (gen != generation) {
+                                return;
+                            }
                             String style = styleFor(contentType, display);
                             DisplayTextSplitter.Split split =
                                     editable
@@ -279,6 +288,9 @@ public class PrettifyHttpPanelView
                                                     display, display, new int[0], numbering)
                                             : DisplayTextSplitter.split(
                                                     display, numbering, style, widthPx, widths);
+                            if (gen != generation) {
+                                return;
+                            }
                             int[] lineNumbers =
                                     LineNumbers.forDisplay(numbering, split.displayText());
                             int maxLineNumber = 1;
@@ -286,6 +298,9 @@ public class PrettifyHttpPanelView
                                 if (lineNumber > maxLineNumber) {
                                     maxLineNumber = lineNumber;
                                 }
+                            }
+                            if (gen != generation) {
+                                return;
                             }
                             RSyntaxDocument document =
                                     ChunkedTextLoader.buildDocument(
@@ -326,6 +341,29 @@ public class PrettifyHttpPanelView
             text = stripTrailing ? stripTrailingNewlines(raw) : raw;
         }
         return text;
+    }
+
+    /**
+     * Formats a body that is pasted into this view. Header views and pastes into the header block
+     * of an All view are left exactly as pasted; a body is formatted with the message's content
+     * type, or with a sniff of the pasted text when the content type is not decisive.
+     */
+    private String formatPastedText(String text) {
+        if (text == null || text.isEmpty() || isHeaderTarget()) {
+            return text;
+        }
+        if (target == Target.REQUEST_ALL || target == Target.RESPONSE_ALL) {
+            // The All view shows the header block and the body in one document. Only a paste that
+            // starts and ends after the blank-line separator is a body paste.
+            String display = textArea.getText();
+            int separator = display.indexOf("\n\n");
+            if (separator < 0
+                    || textArea.getSelectionStart() <= separator + 1
+                    || textArea.getSelectionEnd() <= separator + 1) {
+                return text;
+            }
+        }
+        return PrettyPrint.formatPastedBody(contentTypeOf(model.getMessage()), text);
     }
 
     /**
@@ -781,9 +819,9 @@ public class PrettifyHttpPanelView
     }
 
     /**
-     * Re-splits when the panel has really changed width. The delay keeps a drag from starting a
-     * split per pixel, and a change smaller than one character is ignored because it cannot move a
-     * break.
+     * Re-splits as soon as the panel has really changed width. A change smaller than one character
+     * is ignored because it cannot move a break. The split runs off the EDT, and a newer width
+     * supersedes an older one, so there is no need to wait for a resize to settle.
      */
     private void resplitIfWidthChanged() {
         if (editable || changed) {
@@ -797,17 +835,8 @@ public class PrettifyHttpPanelView
         if (wrappedWidthPx > 0 && Math.abs(widthPx - wrappedWidthPx) < charAdvance()) {
             return;
         }
-        if (resplitTimer == null) {
-            resplitTimer =
-                    new Timer(
-                            RESPLIT_DELAY_MS,
-                            e -> {
-                                widthCorrections = 0;
-                                resplit();
-                            });
-            resplitTimer.setRepeats(false);
-        }
-        resplitTimer.restart();
+        widthCorrections = 0;
+        resplit();
     }
 
     /** Syntax highlighting is always applied, based on the fixed style or the content type. */
@@ -939,15 +968,26 @@ public class PrettifyHttpPanelView
             }
         }
         changed = false;
-        rawText = newRaw;
+        // Remember what the model actually holds, so a later dataChanged for the same message
+        // does not rebuild the document and throw away the undo history. The model may normalize
+        // trailing header newlines; the texts stay whitespace-equivalent, which is all the offset
+        // mapping needs.
+        String saved = model.getData();
+        rawText =
+                saved != null && TextAlignment.sameNonWhitespace(saved, edited) ? saved : newRaw;
         displaySource = edited;
         rememberBody();
         // The body is in the message now, so the request can be given the content type it has.
-        setContentTypeIfMissing();
-        pendingCaretCount =
-                TextAlignment.nonWhitespaceBefore(edited, textArea.getCaretPosition());
-        pendingScrollValue = scrollPane.getVerticalScrollBar().getValue();
-        updateInternal();
+        boolean headerChanged = setContentTypeIfMissing();
+        if (headerChanged && target == Target.REQUEST_ALL) {
+            // The All view shows the header block, so the added type has to be rendered. The
+            // body view is unaffected by a header-only change and keeps its document (and undo
+            // history) instead of being rebuilt after every send.
+            pendingCaretCount =
+                    TextAlignment.nonWhitespaceBefore(edited, textArea.getCaretPosition());
+            pendingScrollValue = scrollPane.getVerticalScrollBar().getValue();
+            updateInternal();
+        }
     }
 
     @Override
@@ -1027,6 +1067,17 @@ public class PrettifyHttpPanelView
         }
         undoZapBodyChange();
         setContentTypeIfMissing();
+        String data = model.getData();
+        if (data == null) {
+            data = "";
+        }
+        if (data.equals(rawText) || TextAlignment.sameNonWhitespace(data, rawText)) {
+            // The model still holds the text the current document was built from. Keeping the
+            // document keeps the user's edits and their undo history; rebuilding it here was what
+            // made Ctrl+Z stop working after a send. A whitespace-only difference (line endings or
+            // a trailing newline the model normalises) does not change what the view shows.
+            return;
+        }
         update();
     }
 
@@ -1034,52 +1085,56 @@ public class PrettifyHttpPanelView
      * Gives a request that carries a body the content type it has, when it does not have one: the
      * type is taken from the body, so that a request sent with a JSON body says that it is JSON.
      * Only a request that is being edited is touched.
+     *
+     * @return whether the request header was changed
      */
-    private void setContentTypeIfMissing() {
+    private boolean setContentTypeIfMissing() {
         if (!editable) {
-            return;
+            return false;
         }
         if (target != Target.REQUEST_BODY && target != Target.REQUEST_ALL) {
-            return;
+            return false;
         }
         Message message = model.getMessage();
         if (!(message instanceof HttpMessage)) {
-            return;
+            return false;
         }
         HttpMessage httpMessage = (HttpMessage) message;
         HttpRequestHeader header = httpMessage.getRequestHeader();
         if (header == null) {
-            return;
+            return false;
         }
         if (!methodCarriesBody(header.getMethod())) {
-            return;
+            return false;
         }
         String body =
                 httpMessage.getRequestBody() == null
                         ? ""
                         : httpMessage.getRequestBody().toString();
         if (body.trim().isEmpty()) {
-            return;
+            return false;
         }
         String contentType = ContentType.contentTypeFor(ContentType.sniff(body));
         if (contentType == null) {
             // The body does not say what it is, so nothing is guessed.
-            return;
+            return false;
         }
         String current = header.getHeader("Content-Type");
         if (current == null) {
             // The request does not say what it carries.
             header.setHeader("Content-Type", contentType);
-            return;
+            return true;
         }
         if (contentType.equals(current)) {
-            return;
+            return false;
         }
         if (isFormContentType(current) && !isFormContentType(contentType)) {
             // ZAP labels a request as a form when it moves the query string back into the body;
             // the body says what it is, so the label is corrected.
             header.setHeader("Content-Type", contentType);
+            return true;
         }
+        return false;
     }
 
     /** Whether a content type names a form body. */

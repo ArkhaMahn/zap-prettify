@@ -2,6 +2,7 @@ package org.zaproxy.zap.extension.prettify;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
@@ -41,9 +42,22 @@ class TextAlignmentTest {
     }
 
     @Test
-    void whitespaceOnlyEditLeavesRawUnchanged() {
+    void whitespaceOnlyEditIsAppliedToRaw() {
         String edited = FORMATTED_JSON.replace("  ", "    ");
-        assertEquals(RAW_JSON, TextAlignment.applyEditToRaw(RAW_JSON, FORMATTED_JSON, edited));
+        String result = TextAlignment.applyEditToRaw(RAW_JSON, FORMATTED_JSON, edited);
+        assertNotEquals(RAW_JSON, result);
+        assertTrue(result.contains("\n"));
+        assertTrue(TextAlignment.sameNonWhitespace(RAW_JSON, result));
+    }
+
+    @Test
+    void insertingALineBreakInABodyIsAppliedToRaw() {
+        String raw = "{\"a\":1,\"b\":2}";
+        String formatted = "{\n  \"a\": 1,\n  \"b\": 2\n}";
+        String edited = formatted.replace("\"a\": 1,", "\"a\": 1,\n  ");
+        String result = TextAlignment.applyEditToRaw(raw, formatted, edited);
+        assertTrue(result.contains("\n"));
+        assertTrue(TextAlignment.sameNonWhitespace(raw, result));
     }
 
     @Test

@@ -58,6 +58,26 @@ public final class PrettyPrint {
         }
     }
 
+    /**
+     * Formats text pasted into an editable body. The content type is used when it is decisive;
+     * otherwise the pasted text is sniffed. The text is returned unchanged when no formatter
+     * applies or when formatting would change a non-whitespace character, so a paste can never
+     * alter the message's data.
+     */
+    public static String formatPastedBody(String contentType, String text) {
+        if (text == null || text.isEmpty()) {
+            return text;
+        }
+        String style = ContentType.styleKeyFor(contentType, text);
+        String formatted = formatBody(style, text);
+        if (formatted == null
+                || formatted.equals(text)
+                || !TextAlignment.sameNonWhitespace(text, formatted)) {
+            return text;
+        }
+        return formatted;
+    }
+
     /** Formats the body of a full message (status/request line + headers + body). */
     public static String formatMessage(String bodyStyleKey, String message) {
         return formatMessage(bodyStyleKey, message, true);

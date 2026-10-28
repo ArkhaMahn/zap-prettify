@@ -130,11 +130,8 @@ public final class TextAlignment {
             }
             return edited + raw.substring(formatted.length());
         }
-        if (sameNonWhitespace(formatted, edited)) {
-            // The user only moved the whitespace the formatter inserted. The raw message already
-            // has its own whitespace, so there is nothing to save.
-            return raw;
-        }
+        // A difference in whitespace only is still a user edit (indentation or a line break the
+        // user typed), so it is applied to the raw text like any other change.
         int limit = Math.min(formatted.length(), edited.length());
         int prefix = 0;
         while (prefix < limit && formatted.charAt(prefix) == edited.charAt(prefix)) {

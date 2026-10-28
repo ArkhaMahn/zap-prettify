@@ -103,6 +103,39 @@ class ContentTypeTest {
     }
 
     @Test
+    void pastedJsonBodyIsFormatted() {
+        String pasted = "{\"a\":1,\"b\":[2,3]}";
+        String formatted = PrettyPrint.formatPastedBody("application/json", pasted);
+        assertNotEquals(pasted, formatted);
+        assertTrue(formatted.contains("\n"));
+        assertTrue(TextAlignment.sameNonWhitespace(pasted, formatted));
+    }
+
+    @Test
+    void pastedBodyWithUnknownTypeIsSniffed() {
+        String pasted = "{\"a\":1,\"b\":2}";
+        String formatted = PrettyPrint.formatPastedBody("text/plain", pasted);
+        assertNotEquals(pasted, formatted);
+        assertTrue(formatted.contains("\n"));
+        assertTrue(TextAlignment.sameNonWhitespace(pasted, formatted));
+    }
+
+    @Test
+    void pastedFormBodyIsNotFormatted() {
+        String pasted = "a=1&b=2&c=3";
+        assertEquals(
+                pasted,
+                PrettyPrint.formatPastedBody("application/x-www-form-urlencoded", pasted));
+    }
+
+    @Test
+    void pastedBinaryBodyIsNotFormatted() {
+        String pasted = "\u0000\u0001{\"a\":1}";
+        assertEquals(pasted, PrettyPrint.formatPastedBody("application/octet-stream", pasted));
+        assertEquals(pasted, PrettyPrint.formatPastedBody("application/protobuf", pasted));
+    }
+
+    @Test
     void largeBodyIsFormatted() {
         StringBuilder body = new StringBuilder("[");
         for (int i = 0; i < 20_000; i++) {

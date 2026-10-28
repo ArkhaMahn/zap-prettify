@@ -3,9 +3,16 @@ package org.zaproxy.zap.extension.prettify;
 import java.awt.Container;
 import java.awt.Font;
 import java.awt.FontMetrics;
+import java.awt.Toolkit;
+import java.awt.datatransfer.Clipboard;
+import java.awt.datatransfer.DataFlavor;
+import java.awt.datatransfer.Transferable;
+import java.awt.datatransfer.UnsupportedFlavorException;
 import java.awt.font.FontRenderContext;
+import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.UnaryOperator;
 import javax.swing.JViewport;
 import javax.swing.text.BadLocationException;
 import javax.swing.text.DefaultHighlighter;
@@ -19,6 +26,7 @@ import org.fife.ui.rsyntaxtextarea.Token;
 import org.fife.ui.rsyntaxtextarea.TokenMakerFactory;
 import org.fife.ui.rtextarea.RTextAreaUI;
 import org.fife.ui.rtextarea.RTextScrollPane;
+import org.fife.ui.rtextarea.RUndoManager;
 import org.zaproxy.zap.utils.DisplayUtils;
 import org.zaproxy.zap.view.HighlightSearchEntry;
 import org.zaproxy.zap.view.HighlighterManager;
@@ -79,6 +87,12 @@ public class PrettifyTextArea extends RSyntaxTextArea {
 
     /** The raw message text the view is showing, used to map a copy back to the received bytes. */
     private String rawText;
+
+    /**
+     * Formats pasted text before it is inserted, or returns it unchanged when it is not a body that
+     * can be formatted. Set by the view, which knows the message part and its content type.
+     */
+    private UnaryOperator<String> pasteFormatter;
 
     /** Notified when the Look and Feel (and therefore the colour scheme) changed. */
     private final List<Runnable> themeListeners = new CopyOnWriteArrayList<>();
@@ -205,7 +219,9 @@ public class PrettifyTextArea extends RSyntaxTextArea {
         setMarkOccurrences(false);
         setBracketMatchingEnabled(false);
         setAnimateBracketMatching(false);
-        setAutoIndentEnabled(false);
+        // Keep the indentation of the formatted text while editing: Enter copies the current
+        // line's leading whitespace and adds a level after an opening brace.
+        setAutoIndentEnabled(true);
         setCloseCurlyBraces(false);
         setCloseMarkupTags(false);
         setClearWhitespaceLinesEnabled(false);
@@ -252,6 +268,63 @@ public class PrettifyTextArea extends RSyntaxTextArea {
      */
     void setMessageText(String rawText) {
         this.rawText = rawText;
+    }
+
+    /**
+     * Sets the formatter applied to pasted text. It returns the text unchanged when the paste is
+     * not a body that can be formatted, so a paste in a header view keeps the received bytes.
+     */
+    void setPasteFormatter(UnaryOperator<String> formatter) {
+        this.pasteFormatter = formatter;
+    }
+
+    /**
+     * Formats a pasted body before inserting it. The formatted text is inserted as one atomic edit,
+     * so a single undo removes the whole paste.
+     */
+    @Override
+    public void paste() {
+        UnaryOperator<String> formatter = pasteFormatter;
+        if (!isEditable() || formatter == null) {
+            super.paste();
+            return;
+        }
+        String text = clipboardText();
+        if (text == null || text.isEmpty()) {
+            super.paste();
+            return;
+        }
+        String formatted = text;
+        try {
+            formatted = formatter.apply(text);
+        } catch (RuntimeException e) {
+            LOGGER.debug("Could not format the pasted text.", e);
+        }
+        if (formatted == null || formatted.equals(text)) {
+            super.paste();
+            return;
+        }
+        beginAtomicEdit();
+        try {
+            replaceSelection(formatted);
+        } finally {
+            endAtomicEdit();
+        }
+    }
+
+    /** The clipboard's text, or null when it is empty or cannot be read. */
+    private static String clipboardText() {
+        try {
+            Clipboard clipboard = Toolkit.getDefaultToolkit().getSystemClipboard();
+            Transferable contents = clipboard.getContents(null);
+            if (contents != null && contents.isDataFlavorSupported(DataFlavor.stringFlavor)) {
+                Object data = contents.getTransferData(DataFlavor.stringFlavor);
+                return data instanceof String ? (String) data : null;
+            }
+        } catch (RuntimeException | UnsupportedFlavorException | IOException e) {
+            LOGGER.debug("Could not read the clipboard.", e);
+        }
+        return null;
     }
 
     /**
@@ -412,6 +485,21 @@ public class PrettifyTextArea extends RSyntaxTextArea {
     @Override
     protected RTextAreaUI createRTextAreaUI() {
         return new PrettifyTextAreaUI(this);
+    }
+
+    /**
+     * Keeps the whole editing session in the undo history. RTextArea's default manager stops after
+     * 100 edits; a message editor is more useful when Ctrl+Z can walk back through every change.
+     *
+     * <p>{@link javax.swing.undo.UndoManager#setLimit(int)} treats {@code 0} as "keep no edits"
+     * (its trimming only stops at a negative limit), so a very large limit is used to mean
+     * effectively unlimited.
+     */
+    @Override
+    protected RUndoManager createUndoManager() {
+        RUndoManager manager = super.createUndoManager();
+        manager.setLimit(Integer.MAX_VALUE);
+        return manager;
     }
 
     public boolean isDark() {
