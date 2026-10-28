@@ -126,6 +126,9 @@ public class PrettifyHttpPanelView
     /** Line-number digits of the installed document, used to calibrate {@link #gutterFixedWidth}. */
     private int installedDigits = -1;
 
+    /** The message the installed document was built from, to tell a new message from a change. */
+    private Message shownMessage;
+
     /** Where the caret should be restored after a re-render, counted in non-whitespace characters. */
     private int pendingCaretCount = -1;
 
@@ -394,6 +397,7 @@ public class PrettifyHttpPanelView
             long gen) {
         rawText = raw;
         displaySource = split.displayText();
+        shownMessage = model.getMessage();
         ChunkedTextLoader.installDocument(
                 textArea,
                 document,
@@ -1071,11 +1075,14 @@ public class PrettifyHttpPanelView
         if (data == null) {
             data = "";
         }
-        if (data.equals(rawText) || TextAlignment.sameNonWhitespace(data, rawText)) {
+        if (data.equals(rawText)
+                || (model.getMessage() == shownMessage
+                        && TextAlignment.sameNonWhitespace(data, rawText))) {
             // The model still holds the text the current document was built from. Keeping the
             // document keeps the user's edits and their undo history; rebuilding it here was what
             // made Ctrl+Z stop working after a send. A whitespace-only difference (line endings or
-            // a trailing newline the model normalises) does not change what the view shows.
+            // a trailing newline the model normalises) does not change what the view shows, but a
+            // different message always gets its own document.
             return;
         }
         update();
