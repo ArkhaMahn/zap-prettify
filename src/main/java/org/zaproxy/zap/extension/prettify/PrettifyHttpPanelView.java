@@ -1126,12 +1126,19 @@ public class PrettifyHttpPanelView
             // The body does not say what it is, so nothing is guessed.
             return false;
         }
-        String current = header.getHeader("Content-Type");
-        if (current == null) {
+        List<String> currentValues = header.getHeaderValues("Content-Type");
+        if (currentValues == null || currentValues.isEmpty()) {
             // The request does not say what it carries.
             header.setHeader("Content-Type", contentType);
             return true;
         }
+        if (currentValues.size() > 1) {
+            // ZAP's setHeader rewrites every header line with that name. A request can legitimately
+            // carry repeated headers, and the user may have added them on purpose, so leave the
+            // whole header block (and its order) alone rather than collapsing the values.
+            return false;
+        }
+        String current = currentValues.get(0);
         if (contentType.equals(current)) {
             return false;
         }

@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import java.lang.reflect.Field;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import javax.swing.SwingUtilities;
@@ -13,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import org.parosproxy.paros.network.HttpMessage;
 import org.parosproxy.paros.network.HttpRequestHeader;
 import org.zaproxy.zap.extension.httppanel.view.AbstractStringHttpPanelViewModel;
+import org.zaproxy.zap.extension.httppanel.view.impl.models.http.request.RequestStringHttpPanelViewModel;
 
 class PrettifyHttpPanelViewTest {
 
@@ -58,6 +60,110 @@ class PrettifyHttpPanelViewTest {
         SwingUtilities.invokeAndWait(area::undoLastAction);
         SwingUtilities.invokeAndWait(view::save);
         assertEquals("{\"a\":1}", model.getData());
+    }
+
+    @Test
+    void addingAHeaderInTheAllViewKeepsItOnItsOwnLineAndInOrder() throws Exception {
+        String header =
+                "POST http://example.com/ HTTP/1.1\r\n"
+                        + "Host: example.com\r\n"
+                        + "X-Test: one\r\n"
+                        + "X-Test: two\r\n"
+                        + "X-Other: three\r\n"
+                        + "Content-Type: application/json\r\n"
+                        + "\r\n";
+        HttpMessage message = new HttpMessage(new HttpRequestHeader(header));
+        message.setRequestBody("{\"a\":1,\"b\":2}");
+        RequestStringHttpPanelViewModel model = new RequestStringHttpPanelViewModel();
+        model.setMessage(message);
+
+        PrettifyHttpPanelView view =
+                new PrettifyHttpPanelView(
+                        "test", "test", null, PrettifyHttpPanelView.Target.REQUEST_ALL, model);
+        PrettifyTextArea area = textAreaOf(view);
+        waitUntil(() -> !area.getText().isEmpty());
+        Document readOnlyDocument = area.getDocument();
+        SwingUtilities.invokeAndWait(() -> view.setEditable(true));
+        waitUntil(() -> area.getDocument() != readOnlyDocument);
+
+        SwingUtilities.invokeAndWait(
+                () -> {
+                    int separator = area.getText().indexOf("\n\n");
+                    area.setCaretPosition(separator);
+                    // Enter followed by a new header, as typed at the end of the header block.
+                    area.replaceSelection("\nX-Test: four");
+                    view.save();
+                });
+
+        assertEquals(
+                List.of("one", "two", "four"), message.getRequestHeader().getHeaderValues("X-Test"));
+        assertEquals(
+                "POST http://example.com/ HTTP/1.1\r\n"
+                        + "Host: example.com\r\n"
+                        + "X-Test: one\r\n"
+                        + "X-Test: two\r\n"
+                        + "X-Other: three\r\n"
+                        + "Content-Type: application/json\r\n"
+                        + "X-Test: four\r\n"
+                        + "\r\n",
+                message.getRequestHeader().toString());
+        assertEquals("{\"a\":1,\"b\":2}", message.getRequestBody().toString());
+        assertTrue(area.getText().contains("\nX-Test: four\n\n"));
+    }
+
+    @Test
+    void aMissingContentTypeIsStillAddedFromTheBody() throws Exception {
+        String header =
+                "POST http://example.com/ HTTP/1.1\r\n"
+                        + "Host: example.com\r\n"
+                        + "X-Test: one\r\n"
+                        + "\r\n";
+        HttpMessage message = new HttpMessage(new HttpRequestHeader(header));
+        message.setRequestBody("{\"a\":1}");
+        RequestStringHttpPanelViewModel model = new RequestStringHttpPanelViewModel();
+        model.setMessage(message);
+
+        PrettifyHttpPanelView view =
+                new PrettifyHttpPanelView(
+                        "test", "test", null, PrettifyHttpPanelView.Target.REQUEST_ALL, model);
+        PrettifyTextArea area = textAreaOf(view);
+        waitUntil(() -> !area.getText().isEmpty());
+        Document readOnlyDocument = area.getDocument();
+        SwingUtilities.invokeAndWait(() -> view.setEditable(true));
+        waitUntil(() -> area.getDocument() != readOnlyDocument);
+
+        assertEquals(
+                List.of("application/json"),
+                message.getRequestHeader().getHeaderValues("Content-Type"));
+    }
+
+    @Test
+    void duplicateContentTypeHeadersAreLeftAlone() throws Exception {
+        String header =
+                "POST http://example.com/ HTTP/1.1\r\n"
+                        + "Host: example.com\r\n"
+                        + "Content-Type: application/x-www-form-urlencoded\r\n"
+                        + "Content-Type: text/plain\r\n"
+                        + "\r\n";
+        HttpMessage message = new HttpMessage(new HttpRequestHeader(header));
+        message.setRequestBody("{\"a\":1}");
+        RequestStringHttpPanelViewModel model = new RequestStringHttpPanelViewModel();
+        model.setMessage(message);
+
+        PrettifyHttpPanelView view =
+                new PrettifyHttpPanelView(
+                        "test", "test", null, PrettifyHttpPanelView.Target.REQUEST_ALL, model);
+        PrettifyTextArea area = textAreaOf(view);
+        waitUntil(() -> !area.getText().isEmpty());
+        Document readOnlyDocument = area.getDocument();
+        SwingUtilities.invokeAndWait(() -> view.setEditable(true));
+        waitUntil(() -> area.getDocument() != readOnlyDocument);
+
+        SwingUtilities.invokeAndWait(() -> view.dataChanged(null));
+
+        assertEquals(
+                List.of("application/x-www-form-urlencoded", "text/plain"),
+                message.getRequestHeader().getHeaderValues("Content-Type"));
     }
 
     private static PrettifyTextArea textAreaOf(PrettifyHttpPanelView view) throws Exception {

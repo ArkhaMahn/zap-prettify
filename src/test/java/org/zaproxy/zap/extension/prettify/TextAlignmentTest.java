@@ -135,6 +135,78 @@ class TextAlignmentTest {
     }
 
     @Test
+    void addingAHeaderAfterTheLastHeaderLineKeepsItOnItsOwnLine() {
+        String raw =
+                "POST / HTTP/1.1\n"
+                        + "Host: example.com\n"
+                        + "X-Test: one\n"
+                        + "X-Test: two\n"
+                        + "\n"
+                        + "{\"a\":1,\"b\":2}";
+        String formatted =
+                "POST / HTTP/1.1\n"
+                        + "Host: example.com\n"
+                        + "X-Test: one\n"
+                        + "X-Test: two\n"
+                        + "\n"
+                        + "{\n  \"a\": 1,\n  \"b\": 2\n}";
+        String edited =
+                "POST / HTTP/1.1\n"
+                        + "Host: example.com\n"
+                        + "X-Test: one\n"
+                        + "X-Test: two\n"
+                        + "X-Test: three\n"
+                        + "\n"
+                        + "{\n  \"a\": 1,\n  \"b\": 2\n}";
+
+        assertEquals(
+                "POST / HTTP/1.1\n"
+                        + "Host: example.com\n"
+                        + "X-Test: one\n"
+                        + "X-Test: two\n"
+                        + "X-Test: three\n"
+                        + "\n"
+                        + "{\"a\":1,\"b\":2}",
+                TextAlignment.applyEditToRaw(raw, formatted, edited));
+    }
+
+    @Test
+    void duplicatingAHeaderKeepsBothCopiesAndTheirOrder() {
+        String raw =
+                "POST / HTTP/1.1\n"
+                        + "Host: example.com\n"
+                        + "X-Test: one\n"
+                        + "X-Other: value\n"
+                        + "\n"
+                        + "{\"a\":1}";
+        String formatted =
+                "POST / HTTP/1.1\n"
+                        + "Host: example.com\n"
+                        + "X-Test: one\n"
+                        + "X-Other: value\n"
+                        + "\n"
+                        + "{\n  \"a\": 1\n}";
+        String edited =
+                "POST / HTTP/1.1\n"
+                        + "Host: example.com\n"
+                        + "X-Test: one\n"
+                        + "X-Test: one\n"
+                        + "X-Other: value\n"
+                        + "\n"
+                        + "{\n  \"a\": 1\n}";
+
+        assertEquals(
+                "POST / HTTP/1.1\n"
+                        + "Host: example.com\n"
+                        + "X-Test: one\n"
+                        + "X-Test: one\n"
+                        + "X-Other: value\n"
+                        + "\n"
+                        + "{\"a\":1}",
+                TextAlignment.applyEditToRaw(raw, formatted, edited));
+    }
+
+    @Test
     void formBodiesAreNotFormatted() {
         String raw = "a=1&b=2&c=3";
         assertEquals(raw, PrettyPrint.formatBody(ContentType.FORM_STYLE, raw));

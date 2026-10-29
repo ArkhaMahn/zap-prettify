@@ -148,6 +148,15 @@ public final class TextAlignment {
         int formattedEnd = formatted.length() - suffix;
         String replacement = edited.substring(formattedStart, edited.length() - suffix);
 
+        if (formattedStart == formattedEnd) {
+            // A pure insertion at a whitespace boundary (for example a new header typed on the
+            // blank line that separates the headers from a formatted body). Mapping the boundary
+            // to "just after the previous non-whitespace character" would put the text before the
+            // newline and glue it to the previous header, so map the whitespace position itself.
+            int rawAt = mapOffset(formatted, raw, formattedStart);
+            return raw.substring(0, rawAt) + replacement + raw.substring(rawAt);
+        }
+
         int before = nonWhitespaceBefore(formatted, formattedStart);
         int after = nonWhitespaceBefore(formatted, formattedEnd);
 
@@ -175,6 +184,48 @@ public final class TextAlignment {
             return raw;
         }
         return raw.substring(0, rawStart) + replacement + raw.substring(rawEnd);
+    }
+
+    /**
+     * Maps an offset between two texts that contain the same non-whitespace characters. A position
+     * on a character maps to that character; a position inside a whitespace run keeps the same
+     * relative position when the runs are identical (the header block is shared by the raw message
+     * and its projection), and otherwise follows the same line break.
+     */
+    private static int mapOffset(String from, String to, int offset) {
+        int at = clamp(offset, 0, from.length());
+        int before = nonWhitespaceBefore(from, at);
+        if (at < from.length() && !isWhitespace(from.charAt(at))) {
+            return indexOfNonWhitespace(to, before + 1);
+        }
+        int fromStart = offsetAfterNonWhitespace(from, before);
+        int fromEnd = indexOfNonWhitespace(from, before + 1);
+        int toStart = offsetAfterNonWhitespace(to, before);
+        int toEnd = indexOfNonWhitespace(to, before + 1);
+        int within = clamp(at, fromStart, fromEnd) - fromStart;
+        String fromGap = from.substring(fromStart, fromEnd);
+        String toGap = to.substring(toStart, toEnd);
+        if (fromGap.equals(toGap)) {
+            return toStart + within;
+        }
+        // The projection changed this run's whitespace. Keep the position after the same line
+        // break so an edit in a re-indented body still lands on the line the user changed.
+        int lineBreaks = 0;
+        for (int i = 0; i < within; i++) {
+            if (fromGap.charAt(i) == '\n') {
+                lineBreaks++;
+            }
+        }
+        if (lineBreaks == 0) {
+            return toStart;
+        }
+        int seen = 0;
+        for (int i = 0; i < toGap.length(); i++) {
+            if (toGap.charAt(i) == '\n' && ++seen == lineBreaks) {
+                return toStart + i + 1;
+            }
+        }
+        return toEnd;
     }
 
     /** Removes trailing CR/LF characters from {@code text}. */
