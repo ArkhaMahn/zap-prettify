@@ -1,15 +1,15 @@
 # Prettify for OWASP ZAP
 
-Prettify adds Burp-style, syntax-highlighted "Pretty" views to the OWASP ZAP HTTP request and response panels. It presents messages with beautiful syntax highlighting, viewport-width line splitting, and original-line numbering as additional tabs without replacing ZAP's core views.
+Prettify adds syntax-highlighted "Pretty" views to the OWASP ZAP HTTP request and response panels. It presents messages with beautiful syntax highlighting, viewport-width line splitting, and original-line numbering as additional tabs without replacing ZAP's core views.
 
 ## Features
 
 - **Additional tabs, no replacement** - Adds "Pretty" tabs for Request Split (Header/Body), Response Split (Header/Body), Request All, and Response All. The core Text view remains unchanged and fully functional.
 - **Syntax highlighting** - Always-on syntax highlighting powered by RSyntaxTextArea. Automatically detects and highlights HTTP, JSON, XML, HTML, JavaScript, CSS, and form data based on Content-Type, with a conservative body sniff for custom or missing types.
-- **Burp-like theming** - Light and dark themes that automatically match ZAP's look and feel, including live refreshes when the Look and Feel changes.
+- **Light and dark theming** - Themes that automatically match ZAP's look and feel, including live refreshes when the Look and Feel changes.
 - **Smart pretty-printing** - JSON, XML, HTML, CSS, JavaScript, TypeScript, and GraphQL are prettified for better readability, including when they arrive under a custom content type that has to be sniffed. Header-only views are cleaned up without affecting the underlying message structure. Form-encoded bodies are shown exactly as received, and binary or protobuf payloads are never formatted.
 - **Pre-split display** - Long lines are split into display rows at the calculated viewport width, so header values, URLs, and other unbroken runs fill each row. The breaks exist only in the display: the message itself is untouched, and rows are recalculated immediately when the panel is resized.
-- **Original line numbering** - Only original message lines are numbered in the gutter; split continuations and pretty-print-inserted lines are left blank, matching Burp's behavior.
+- **Original line numbering** - Only original message lines are numbered in the gutter; split continuations and pretty-print-inserted lines are left blank.
 - **Editable support** - Pretty views can be edited in editable contexts (like the Requester). Edits are applied back to the raw message through a non-whitespace alignment, so the original whitespace and line endings outside the changed range are preserved. Copying a selection yields the received text, not the formatter's projection. Line numbers follow your edits dynamically. Header order and repeated headers are preserved, so added or duplicated headers stay where you put them. Auto-indent keeps the formatted structure while you type, and the undo history is unlimited and survives sending a request, so Ctrl+Z can walk back through earlier states.
 - **Paste formatting** - Pasting a JSON, XML, HTML, CSS, JavaScript or GraphQL body formats it before inserting it. Form-encoded, binary and protobuf bodies are inserted exactly as pasted. A header paste is never reformatted.
 - **Large message support** - Formatting and tokenization run off the EDT with generation-based cancellation and chunked document loading. There is no size cutoff for pretty-printing: large bodies are formatted like any other, with the work kept off the UI thread.

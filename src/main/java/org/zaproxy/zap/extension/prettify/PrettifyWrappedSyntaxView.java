@@ -6,13 +6,13 @@ import org.fife.ui.rsyntaxtextarea.Token;
 import org.fife.ui.rsyntaxtextarea.WrappedSyntaxView;
 
 /**
- * A word-wrapping view with Burp-style line breaks.
+ * A word-wrapping view with editor-style line breaks.
  *
  * <p>RSyntaxTextArea's stock {@code WrappedSyntaxView.calculateBreakPosition} breaks only at token
  * boundaries: when a token does not fit and is not the first one on the row, it moves the whole
  * token to the next row. Because a header value is emitted as a single token, a long value jumps
- * to the next line (leaving the header name stranded with empty space after it). Burp instead fills
- * the row and breaks the value mid-token.
+ * to the next line (leaving the header name stranded with empty space after it). This view instead
+ * fills the row and breaks the value mid-token.
  *
  * <p>This view fills the row with as much of the too-wide token as fits, so long values, URLs and
  * other unbroken runs wrap at the character boundary.

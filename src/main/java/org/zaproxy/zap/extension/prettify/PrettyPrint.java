@@ -8,16 +8,15 @@ import java.util.Locale;
 import java.util.Set;
 
 /**
- * Pretty-prints HTTP message bodies the way Burp Suite's message editor "Pretty" tab does: JSON,
- * XML, HTML, CSS and JavaScript are re-indented with two spaces per nesting level and line breaks
- * are inserted at the standard structural points.
+ * Pretty-prints HTTP message bodies: JSON, XML, HTML, CSS and JavaScript are re-indented with two
+ * spaces per nesting level and line breaks are inserted at the standard structural points.
  *
  * <p>Formatting is best-effort and never throws: on any problem the original text is returned
  * unchanged.
  */
 public final class PrettyPrint {
 
-    /** Burp's standardized indentation is two spaces per level. */
+    /** The standard indentation is two spaces per level. */
     private static final String INDENT = "  ";
 
     private static final Set<String> HTML_VOID =

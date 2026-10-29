@@ -3,12 +3,11 @@ package org.zaproxy.zap.extension.prettify;
 import java.awt.Color;
 
 /**
- * Colours used by the Prettify syntax scheme, extracted from Burp Suite's light and dark editor
- * themes ({@code ui.editor.message.*}).
+ * Colours used by the Prettify syntax scheme for light and dark editors.
  */
-public final class BurpTheme {
+public final class PrettifyTheme {
 
-    public static final BurpTheme LIGHT = new BurpTheme(
+    public static final PrettifyTheme LIGHT = new PrettifyTheme(
             /* background            */ "#FFFFFF",
             /* text                  */ "#141414",
             /* httpFirstLine         */ "#141414",
@@ -30,7 +29,7 @@ public final class BurpTheme {
             /* selectionBackground   */ "#CADAF0",
             /* selectionForeground   */ "#FFFFFF");
 
-    public static final BurpTheme DARK = new BurpTheme(
+    public static final PrettifyTheme DARK = new PrettifyTheme(
             /* background            */ "#2B2B2B",
             /* text                  */ "#CECECE",
             /* httpFirstLine         */ "#D1E8F9",
@@ -73,7 +72,7 @@ public final class BurpTheme {
     private final Color selectionBackground;
     private final Color selectionForeground;
 
-    private BurpTheme(
+    private PrettifyTheme(
             String background,
             String text,
             String httpFirstLine,

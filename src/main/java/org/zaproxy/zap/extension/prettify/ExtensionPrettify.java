@@ -18,8 +18,8 @@ import org.zaproxy.zap.extension.httppanel.view.impl.models.http.response.Respon
 import org.zaproxy.zap.view.HttpPanelManager;
 
 /**
- * Prettify add-on: adds a Burp-style, syntax-highlighted "Pretty" view to the request and response
- * panels of ZAP.
+ * Prettify add-on: adds a syntax-highlighted "Pretty" view to the request and response panels of
+ * ZAP.
  */
 public class ExtensionPrettify extends ExtensionAdaptor {
 

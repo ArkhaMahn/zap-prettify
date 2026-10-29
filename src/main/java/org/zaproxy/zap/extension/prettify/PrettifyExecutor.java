@@ -7,9 +7,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * Shared background executor used to prepare message text off the Event Dispatch Thread.
  *
- * <p>Mirrors Burp's approach of doing document preparation asynchronously: work is submitted here
- * and the result is published back on the EDT, while the caller cancels stale work by bumping a
- * generation counter (so only the newest message in a burst is rendered).
+ * <p>Document preparation is asynchronous: work is submitted here and the result is published
+ * back on the EDT, while the caller cancels stale work by bumping a generation counter (so only
+ * the newest message in a burst is rendered).
  *
  * <p>A small pool (not a single thread) is used so that showing a request and its response in quick
  * succession does not serialise the two preparations behind each other. The threads are daemons and

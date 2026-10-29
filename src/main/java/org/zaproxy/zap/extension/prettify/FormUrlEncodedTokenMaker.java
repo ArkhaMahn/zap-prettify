@@ -43,7 +43,7 @@ public class FormUrlEncodedTokenMaker extends AbstractTokenMaker {
                             a,
                             p,
                             stop - 1,
-                            BurpTokenTypes.HTTP_PARAMETER_NAME,
+                            PrettifyTokenTypes.HTTP_PARAMETER_NAME,
                             startOffset + (p - off));
                 }
                 if (kind == 1) {
@@ -64,7 +64,7 @@ public class FormUrlEncodedTokenMaker extends AbstractTokenMaker {
                             a,
                             p,
                             stop - 1,
-                            BurpTokenTypes.HTTP_PARAMETER_VALUE,
+                            PrettifyTokenTypes.HTTP_PARAMETER_VALUE,
                             startOffset + (p - off));
                 }
                 if (amp >= 0) {

@@ -7,7 +7,7 @@ plugins {
 
 group = "prettify"
 version = "1.0.0"
-description = "Prettify - Burp-style syntax-highlighted view of HTTP requests and responses"
+description = "Prettify - syntax-highlighted view of HTTP requests and responses"
 
 repositories {
     mavenCentral()

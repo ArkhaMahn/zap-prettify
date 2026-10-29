@@ -7,17 +7,17 @@ import org.fife.ui.rsyntaxtextarea.TokenTypes;
 
 /**
  * A {@link SyntaxScheme} that colours the standard RSTA token types plus the Prettify HTTP token
- * types ({@link BurpTokenTypes}) using Burp Suite's editor palette.
+ * types ({@link PrettifyTokenTypes}) using the Prettify editor palette.
  */
-public class BurpSyntaxScheme extends SyntaxScheme {
+public class PrettifySyntaxScheme extends SyntaxScheme {
 
     private static final long serialVersionUID = 1L;
 
     private final Style[] styles;
 
-    public BurpSyntaxScheme(BurpTheme theme) {
+    public PrettifySyntaxScheme(PrettifyTheme theme) {
         super(false);
-        this.styles = new Style[BurpTokenTypes.COUNT];
+        this.styles = new Style[PrettifyTokenTypes.COUNT];
 
         Color text = theme.getText();
         Color comment = theme.getComment();
@@ -72,11 +72,11 @@ public class BurpSyntaxScheme extends SyntaxScheme {
         set(TokenTypes.ERROR_STRING_DOUBLE, reserved);
         set(TokenTypes.ERROR_CHAR, reserved);
 
-        set(BurpTokenTypes.HTTP_FIRST_LINE, theme.getHttpFirstLine());
-        set(BurpTokenTypes.HTTP_HEADER_NAME, theme.getHeaderName());
-        set(BurpTokenTypes.HTTP_HEADER_VALUE, theme.getHeaderValue());
-        set(BurpTokenTypes.HTTP_PARAMETER_NAME, theme.getParamName());
-        set(BurpTokenTypes.HTTP_PARAMETER_VALUE, theme.getParamValue());
+        set(PrettifyTokenTypes.HTTP_FIRST_LINE, theme.getHttpFirstLine());
+        set(PrettifyTokenTypes.HTTP_HEADER_NAME, theme.getHeaderName());
+        set(PrettifyTokenTypes.HTTP_HEADER_VALUE, theme.getHeaderValue());
+        set(PrettifyTokenTypes.HTTP_PARAMETER_NAME, theme.getParamName());
+        set(PrettifyTokenTypes.HTTP_PARAMETER_VALUE, theme.getParamValue());
     }
 
     private void set(int index, Color foreground) {

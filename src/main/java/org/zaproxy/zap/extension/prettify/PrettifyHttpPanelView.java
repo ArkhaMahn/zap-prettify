@@ -43,7 +43,7 @@ import org.zaproxy.zap.utils.DisplayUtils;
 import org.zaproxy.zap.view.messagecontainer.http.DefaultSingleHttpMessageContainer;
 
 /**
- * An {@link HttpPanelView} that shows an HTTP message (or one of its parts) as a Burp-style,
+ * An {@link HttpPanelView} that shows an HTTP message (or one of its parts) as a
  * syntax-highlighted, pre-wrapped text area.
  *
  * <p>The raw message is the source of truth. The pretty printer produces a whitespace-only
@@ -219,7 +219,7 @@ public class PrettifyHttpPanelView
         if (gutter == null) {
             return;
         }
-        BurpTheme theme = textArea.isDark() ? BurpTheme.DARK : BurpTheme.LIGHT;
+        PrettifyTheme theme = textArea.isDark() ? PrettifyTheme.DARK : PrettifyTheme.LIGHT;
         gutter.setLineNumberColor(theme.getLineNumbers());
         gutter.setBorderColor(theme.getLineNumbers());
     }
@@ -370,7 +370,7 @@ public class PrettifyHttpPanelView
     }
 
     /**
-     * Burp-style pretty-printing, best-effort and never throwing: the All views reformat the body
+     * Body pretty-printing, best-effort and never throwing: the All views reformat the body
      * that follows the header block, the body-only views reformat the whole (body) text, and the
      * header-only views just drop the blank line that terminates the header block.
      */

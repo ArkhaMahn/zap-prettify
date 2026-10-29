@@ -32,8 +32,7 @@ import org.zaproxy.zap.view.HighlightSearchEntry;
 import org.zaproxy.zap.view.HighlighterManager;
 
 /**
- * An {@link RSyntaxTextArea} configured with the Prettify token maker factory and Burp's colour
- * scheme.
+ * An {@link RSyntaxTextArea} configured with the Prettify token maker factory and colour scheme.
  *
  * <p>The row height is padded (see {@link #getLineHeight()}) so that a token font taller than the
  * base font (for example a bold markup tag name) cannot overlap the next wrapped row.
@@ -64,13 +63,13 @@ public class PrettifyTextArea extends RSyntaxTextArea {
     private static final int MIN_EXTRA_LINE_HEIGHT = 2;
 
     /**
-     * Burp Suite's default HTTP message font family. Burp does not bundle a font and instead uses
-     * this system monospaced font.
+     * The editor's default HTTP message font family. The add-on does not bundle a font and instead
+     * uses this system monospaced font.
      */
-    private static final String BURP_FONT_FAMILY = "Courier New";
+    private static final String EDITOR_FONT_FAMILY = "Courier New";
 
-    /** Burp Suite's default HTTP message font size, in points. */
-    private static final int BURP_FONT_SIZE = 13;
+    /** The editor's default HTTP message font size, in points. */
+    private static final int EDITOR_FONT_SIZE = 13;
 
     private static final TokenMakerFactory TOKEN_MAKER_FACTORY =
             new ContinuedStringTokenMakerFactory(new PrettifyTokenMakerFactory());
@@ -460,7 +459,7 @@ public class PrettifyTextArea extends RSyntaxTextArea {
         if (!initialized) {
             return;
         }
-        // super.updateUI() installs the Look and Feel defaults, which would undo the Burp colours
+        // super.updateUI() installs the Look and Feel defaults, which would undo the Prettify colours
         // and font; reapply them even when the light/dark mode did not change.
         applyTheme(DisplayUtils.isDarkLookAndFeel());
         applyWrap();
@@ -508,14 +507,14 @@ public class PrettifyTextArea extends RSyntaxTextArea {
 
     public void applyTheme(boolean dark) {
         this.dark = dark;
-        BurpTheme theme = dark ? BurpTheme.DARK : BurpTheme.LIGHT;
+        PrettifyTheme theme = dark ? PrettifyTheme.DARK : PrettifyTheme.LIGHT;
         setBackground(theme.getBackground());
         setForeground(theme.getText());
         setCaretColor(theme.getText());
         setSelectionColor(theme.getSelectionBackground());
         setSelectedTextColor(theme.getSelectionForeground());
-        setSyntaxScheme(new BurpSyntaxScheme(theme));
-        setFont(burpFont());
+        setSyntaxScheme(new PrettifySyntaxScheme(theme));
+        setFont(editorFont());
     }
 
     // -- Persisted view configuration (mirrors the core syntax view) --------------------------
@@ -579,15 +578,15 @@ public class PrettifyTextArea extends RSyntaxTextArea {
     }
 
     /**
-     * Burp Suite's default HTTP message font, independent of ZAP's configured "work panels" font.
+     * The editor's default HTTP message font, independent of ZAP's configured "work panels" font.
      * Plain style is forced because the wrapped syntax view overlaps its rows (and so garbles long
      * wrapped lines) when the text area font is bold. Falls back to the platform monospaced font
-     * when {@value #BURP_FONT_FAMILY} is not installed.
+     * when {@value #EDITOR_FONT_FAMILY} is not installed.
      */
-    private static Font burpFont() {
-        Font font = new Font(BURP_FONT_FAMILY, Font.PLAIN, BURP_FONT_SIZE);
-        if (!BURP_FONT_FAMILY.equalsIgnoreCase(font.getFamily())) {
-            font = new Font(Font.MONOSPACED, Font.PLAIN, BURP_FONT_SIZE);
+    private static Font editorFont() {
+        Font font = new Font(EDITOR_FONT_FAMILY, Font.PLAIN, EDITOR_FONT_SIZE);
+        if (!EDITOR_FONT_FAMILY.equalsIgnoreCase(font.getFamily())) {
+            font = new Font(Font.MONOSPACED, Font.PLAIN, EDITOR_FONT_SIZE);
         }
         return font;
     }

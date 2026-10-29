@@ -174,12 +174,12 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
                 while (p < end && !isSpace(arr[p]) && !(stopAtQuery && arr[p] == '?')) {
                     p++;
                 }
-                emit(s, p - 1, BurpTokenTypes.HTTP_FIRST_LINE);
+                emit(s, p - 1, PrettifyTokenTypes.HTTP_FIRST_LINE);
                 if (p >= end) {
                     break;
                 }
                 if (stopAtQuery && arr[p] == '?') {
-                    emit(p, p, BurpTokenTypes.HTTP_FIRST_LINE);
+                    emit(p, p, PrettifyTokenTypes.HTTP_FIRST_LINE);
                     p++;
                     state = S_REQ_QUERY_NAME;
                 } else {
@@ -195,7 +195,7 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
                 while (p < end && arr[p] != '=' && arr[p] != '&' && !isSpace(arr[p])) {
                     p++;
                 }
-                emit(s, p - 1, BurpTokenTypes.HTTP_PARAMETER_NAME);
+                emit(s, p - 1, PrettifyTokenTypes.HTTP_PARAMETER_NAME);
                 if (p >= end) {
                     break;
                 }
@@ -217,7 +217,7 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
                 while (p < end && arr[p] != '&' && !isSpace(arr[p])) {
                     p++;
                 }
-                emit(s, p - 1, BurpTokenTypes.HTTP_PARAMETER_VALUE);
+                emit(s, p - 1, PrettifyTokenTypes.HTTP_PARAMETER_VALUE);
                 if (p >= end) {
                     break;
                 }
@@ -259,7 +259,7 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
             while (p < end && !isSpace(arr[p])) {
                 p++;
             }
-            emit(s, p - 1, BurpTokenTypes.HTTP_FIRST_LINE);
+            emit(s, p - 1, PrettifyTokenTypes.HTTP_FIRST_LINE);
             int ws = p;
             while (p < end && isSpace(arr[p])) {
                 p++;
@@ -285,7 +285,7 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
                 hdrName.append(arr[p]);
                 p++;
             }
-            emit(s, p - 1, BurpTokenTypes.HTTP_HEADER_NAME);
+            emit(s, p - 1, PrettifyTokenTypes.HTTP_HEADER_NAME);
             if (p >= end) {
                 return S_HDR_NAME;
             }
@@ -311,7 +311,7 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
             if (contentTypeHeader && p < end) {
                 contentTypeValue.append(arr, p, end - p);
             }
-            emit(p, end - 1, BurpTokenTypes.HTTP_HEADER_VALUE);
+            emit(p, end - 1, PrettifyTokenTypes.HTTP_HEADER_VALUE);
             return S_HDR_VALUE;
         }
 
@@ -319,7 +319,7 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
             return tokenizeCookieFragment(p, end, state);
         }
 
-        emit(p, end - 1, BurpTokenTypes.HTTP_HEADER_VALUE);
+        emit(p, end - 1, PrettifyTokenTypes.HTTP_HEADER_VALUE);
         return S_HDR_VALUE;
     }
 
@@ -364,7 +364,7 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
                 while (p < end && arr[p] != '=' && arr[p] != ';') {
                     p++;
                 }
-                emit(s, p - 1, BurpTokenTypes.HTTP_PARAMETER_NAME);
+                emit(s, p - 1, PrettifyTokenTypes.HTTP_PARAMETER_NAME);
                 if (p >= end) {
                     break;
                 }
@@ -382,7 +382,7 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
                 while (p < end && arr[p] != ';') {
                     p++;
                 }
-                emit(s, p - 1, BurpTokenTypes.HTTP_PARAMETER_VALUE);
+                emit(s, p - 1, PrettifyTokenTypes.HTTP_PARAMETER_VALUE);
                 if (p >= end) {
                     break;
                 }
