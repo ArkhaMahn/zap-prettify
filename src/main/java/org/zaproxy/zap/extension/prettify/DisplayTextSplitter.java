@@ -42,6 +42,9 @@ public final class DisplayTextSplitter {
     /** Minimum line length worth caching; shorter lines tokenize faster than a cache lookup. */
     private static final int MIN_CACHED_LINE = 64;
 
+    /** Longest leading whitespace copied onto a continuation row, in characters. */
+    private static final int MAX_CONTINUATION_INDENT = 64;
+
     /** Approximate limit, in retained characters, of the per-line token cache. */
     private static final long LINE_CACHE_BUDGET = 16L * 1024 * 1024;
 
@@ -186,8 +189,11 @@ public final class DisplayTextSplitter {
             List<Integer> breakOffsets,
             List<Integer> breakIndents) {
         // Continuation rows are indented to the wrapped line's own indentation level so a wrapped
-        // value does not snap back to column zero but stays under the block it belongs to.
-        int indentLength = leadingIndentLength(string, start, end);
+        // value does not snap back to column zero but stays under the block it belongs to. Cap the
+        // indent at half a row: a line whose whole content is whitespace would otherwise copy the
+        // entire indent onto every one-character row, growing the display quadratically.
+        int indentLength =
+                continuationIndentLength(string, start, end, maxWidth, widths);
         double indentWidth = 0;
         for (int k = start; k < start + indentLength; k++) {
             indentWidth += widths.widthOf(string.codePointAt(k));
@@ -769,6 +775,29 @@ public final class DisplayTextSplitter {
                 break;
             }
             i++;
+        }
+        return i - start;
+    }
+
+    /**
+     * How much of the line's leading whitespace to copy onto each continuation row. The indent is
+     * capped at half a row so a mostly-whitespace line keeps a useful amount of content per row
+     * instead of repeating an arbitrarily long indent once per character.
+     */
+    static int continuationIndentLength(
+            String string, int start, int end, double maxWidth, CharWidths widths) {
+        int indent = Math.min(leadingIndentLength(string, start, end), MAX_CONTINUATION_INDENT);
+        int limit = Math.min(end, start + indent);
+        double width = 0;
+        int i = start;
+        while (i < limit) {
+            int cp = string.codePointAt(i);
+            double cw = widths.widthOf(cp);
+            if (width + cw > maxWidth / 2) {
+                break;
+            }
+            width += cw;
+            i += Character.charCount(cp);
         }
         return i - start;
     }

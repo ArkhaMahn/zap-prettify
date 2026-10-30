@@ -43,6 +43,19 @@ class DisplayTextSplitterTest {
     }
 
     @Test
+    void capsContinuationIndentOnAMostlyWhitespaceLine() {
+        String text = " ".repeat(1_000) + "x".repeat(1_000);
+        DisplayTextSplitter.Split split =
+                DisplayTextSplitter.split(text, text, "text/javascript", 100, ONE_PIXEL);
+        assertTrue(
+                split.displayText().length() < text.length() * 4,
+                "the display stays proportional to the input");
+        for (int indent : split.breakIndents()) {
+            assertTrue(indent <= 50, "the continuation indent is at most half a row");
+        }
+    }
+
+    @Test
     void coloursLongStringsSplitAcrossTokenizerChunks() {
         StringBuilder raw = new StringBuilder("{\"value\":\"");
         for (int i = 0; i < 20_000; i++) {
