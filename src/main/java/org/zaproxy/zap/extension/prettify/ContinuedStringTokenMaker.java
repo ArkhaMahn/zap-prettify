@@ -135,28 +135,12 @@ public class ContinuedStringTokenMaker implements TokenMaker {
     }
 
     private int lastType(Segment segment, int initialTokenType) {
-        int lastType = delegate.getLastTokenTypeOnLine(segment, initialTokenType);
-        Token open = openString(delegate.getTokenList(segment, initialTokenType, 0));
-        if (open == null) {
-            return lastType;
-        }
-        return marker(
-                quoteOfType(open.getType()),
-                open.getLanguageIndex(),
-                lastType,
-                endsWithOddBackslashes(segment));
-    }
-
-    private static Token openString(Token token) {
-        Token open = null;
-        for (Token t = token; t != null; t = t.getNextToken()) {
-            if (!t.isPaintable()) {
-                continue;
-            }
-            int type = t.getType();
-            open = type == TokenTypes.ERROR_STRING_DOUBLE || type == TokenTypes.ERROR_CHAR ? t : null;
-        }
-        return open;
+        // One tokenization, not two: derive both the carried state and the open string from the
+        // token list the delegate already built. RSTA asks for the last token type of every line it
+        // inserts, so tokenizing the line twice here was the dominant cost of building a large
+        // document.
+        return stateAfterLine(
+                delegate.getTokenList(segment, initialTokenType, 0), segment, initialTokenType);
     }
 
     private static Token recolourOpenString(Token token) {

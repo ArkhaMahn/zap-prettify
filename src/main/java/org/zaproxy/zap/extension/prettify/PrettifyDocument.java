@@ -1,5 +1,7 @@
 package org.zaproxy.zap.extension.prettify;
 
+import java.util.Collections;
+import java.util.Set;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
 import javax.swing.text.BadLocationException;
@@ -10,6 +12,7 @@ import org.fife.ui.rsyntaxtextarea.Token;
 import org.fife.ui.rsyntaxtextarea.TokenMaker;
 import org.fife.ui.rsyntaxtextarea.TokenMakerBase;
 import org.fife.ui.rsyntaxtextarea.TokenMakerFactory;
+import org.fife.ui.rsyntaxtextarea.TokenTypes;
 
 /**
  * An {@link RSyntaxDocument} that does not tokenise its text itself: it replays the token spans
@@ -76,7 +79,11 @@ public class PrettifyDocument extends RSyntaxDocument {
             String styleKey,
             DisplayTextSplitter.Split split,
             boolean replayEnabled) {
-        super(tokenMakerFactory, styleKey);
+        // A document that paints from recorded spans never asks its base token maker for tokens:
+        // replayTokenList()/fallbackTokenList() or the HTTP state maker answer every paint. Giving
+        // it a no-op base maker keeps the document from tokenizing the whole text a second time
+        // while it is filled, which is the dominant cost for a large message.
+        super(baseFactory(tokenMakerFactory, styleKey, split, replayEnabled), styleKey);
         this.replayEnabled = replayEnabled;
         this.tokenStarts = split == null ? new int[0] : split.tokenStarts();
         this.tokenEnds = split == null ? new int[0] : split.tokenEnds();
@@ -92,6 +99,26 @@ public class PrettifyDocument extends RSyntaxDocument {
         this.fallbackTokenMaker = tokenMakerFactory.getTokenMaker(styleKey);
         this.continuationStarts = continuationStarts(split);
         this.lineState = new int[Math.max(16, lineCount())];
+    }
+
+    /**
+     * The token maker factory the base {@link RSyntaxDocument} should use. A replaying document
+     * whose rows all have recorded spans (or an HTTP document, which paints through its own state
+     * maker) never needs the base token maker, so it is given a no-op one: filling the document then
+     * does not tokenize the text a second time. Other documents keep the real factory so RSTA's
+     * ordinary tokenization still highlights them.
+     */
+    private static TokenMakerFactory baseFactory(
+            TokenMakerFactory tokenMakerFactory,
+            String styleKey,
+            DisplayTextSplitter.Split split,
+            boolean replayEnabled) {
+        boolean hasSpans = split != null && split.tokenStarts().length != 0;
+        if (replayEnabled
+                && (hasSpans || PrettifyTokenMakerFactory.isHttpStyle(styleKey))) {
+            return NoOpTokenMakerFactory.INSTANCE;
+        }
+        return tokenMakerFactory;
     }
 
     private static int[] continuationStarts(DisplayTextSplitter.Split split) {
@@ -290,21 +317,43 @@ public class PrettifyDocument extends RSyntaxDocument {
         } catch (BadLocationException e) {
             return new int[0];
         }
-        String lower = text.toLowerCase(java.util.Locale.ROOT);
         java.util.List<Integer> ranges = new java.util.ArrayList<>();
         int from = 0;
-        while (from < lower.length()) {
-            int open = lower.indexOf("<script", from);
+        // The comment markers are followed forward once, together with the script tags. Searching
+        // backwards from every tag instead made this quadratic for a minified document with many
+        // script tags on one line, which is exactly the case a large payload tends to be.
+        boolean inComment = false;
+        int nextCommentOpen = indexOfIgnoreCase(text, "<!--", 0);
+        int nextCommentClose = -1;
+        while (from < text.length()) {
+            int open = indexOfIgnoreCase(text, "<script", from);
             if (open < 0) {
                 break;
             }
-            int commentOpen = lower.lastIndexOf("<!--", open);
-            int commentClose = lower.lastIndexOf("-->", open);
-            if (commentOpen > commentClose) {
+            while (true) {
+                if (!inComment) {
+                    if (nextCommentOpen < 0 || nextCommentOpen >= open) {
+                        break;
+                    }
+                    inComment = true;
+                    nextCommentClose = indexOfIgnoreCase(text, "-->", nextCommentOpen + 4);
+                    if (nextCommentClose < 0) {
+                        nextCommentClose = Integer.MAX_VALUE;
+                    }
+                    nextCommentOpen = -1;
+                } else {
+                    if (nextCommentClose >= open) {
+                        break;
+                    }
+                    inComment = false;
+                    nextCommentOpen = indexOfIgnoreCase(text, "<!--", nextCommentClose + 3);
+                }
+            }
+            if (inComment) {
                 from = open + 7;
                 continue;
             }
-            int close = lower.indexOf("</script", open);
+            int close = indexOfIgnoreCase(text, "</script", open);
             int end = close < 0 ? text.length() : Math.min(text.length(), close + 8);
             ranges.add(open);
             ranges.add(end);
@@ -315,6 +364,17 @@ public class PrettifyDocument extends RSyntaxDocument {
             result[i] = ranges.get(i);
         }
         return result;
+    }
+
+    /** Case-insensitive {@code indexOf}, so the text does not have to be lowercased first. */
+    private static int indexOfIgnoreCase(String text, String needle, int from) {
+        int limit = text.length() - needle.length();
+        for (int i = Math.max(0, from); i <= limit; i++) {
+            if (text.regionMatches(true, i, needle, 0, needle.length())) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     /**
@@ -577,6 +637,55 @@ public class PrettifyDocument extends RSyntaxDocument {
             }
         }
         return false;
+    }
+
+    /**
+     * Factory for {@link NoOpTokenMaker}. Used as the base token maker of a document that paints
+     * from recorded spans, so filling it never tokenizes the text.
+     */
+    private static final class NoOpTokenMakerFactory extends TokenMakerFactory {
+
+        static final NoOpTokenMakerFactory INSTANCE = new NoOpTokenMakerFactory();
+
+        private final TokenMaker tokenMaker = new NoOpTokenMaker();
+
+        @Override
+        protected TokenMaker getTokenMakerImpl(String key) {
+            return tokenMaker;
+        }
+
+        @Override
+        public Set<String> keySet() {
+            return Collections.emptySet();
+        }
+    }
+
+    /**
+     * A token maker that treats every line as one plain token. It is only used as the base token
+     * maker of a document that never asks it for tokens; it exists so that
+     * {@link RSyntaxDocument}'s insertion bookkeeping is O(1) per line instead of a tokenization.
+     */
+    private static final class NoOpTokenMaker extends TokenMakerBase {
+
+        @Override
+        public Token getTokenList(Segment text, int initialTokenType, int startOffset) {
+            resetTokenList();
+            if (text.count > 0) {
+                addToken(
+                        text,
+                        text.offset,
+                        text.offset + text.count - 1,
+                        TokenTypes.IDENTIFIER,
+                        startOffset);
+            }
+            addNullToken();
+            return firstToken;
+        }
+
+        @Override
+        public int getLastTokenTypeOnLine(Segment text, int initialTokenType) {
+            return 0;
+        }
     }
 
     /**

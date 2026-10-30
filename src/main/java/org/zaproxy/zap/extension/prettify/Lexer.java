@@ -16,6 +16,14 @@ import org.fife.ui.rsyntaxtextarea.TokenTypes;
  */
 final class Lexer {
 
+    /**
+     * Longest piece handed to a token maker in one call. RSTA's token list grows in tiny
+     * increments and copies the whole list on every growth, so tokenizing a minified body as one
+     * huge line costs time quadratic in its length. Longer lines are tokenized in chunks with the
+     * carried state.
+     */
+    private static final int TOKENIZE_CHUNK = 8192;
+
     /** String / character / template / regular-expression literals and markup attribute values. */
     final boolean[] literal;
 
@@ -65,31 +73,60 @@ final class Lexer {
                 if (len > 0) {
                     body.getChars(pos, end, arr, 0);
                 }
-                Token t = tm.getTokenList(new Segment(arr, 0, len), state, lineStart);
-                for (Token x = t; x != null; x = x.getNextToken()) {
-                    int type = x.getType();
-                    if (type == TokenTypes.NULL) {
-                        continue;
+                int chunkFrom = 0;
+                int inState = state;
+                boolean lastChunk;
+                do {
+                    int chunkTo = Math.min(len, chunkFrom + TOKENIZE_CHUNK);
+                    // Do not cut a surrogate pair in half; a lone surrogate would tokenize as an
+                    // error.
+                    if (chunkTo < len && Character.isHighSurrogate(arr[chunkTo - 1])) {
+                        chunkTo++;
                     }
-                    state = type;
-                    int length = x.length();
-                    if (length <= 0) {
-                        continue;
-                    }
-                    int from = Math.max(0, x.getOffset() - lineStart);
-                    int to = Math.min(len, from + length);
-                    if (isLiteral(type)) {
-                        mark(lex.literal, pos, from, to);
-                        mark(lex.opaque, pos, from, to);
-                    } else if (isComment(type)) {
-                        mark(lex.opaque, pos, from, to);
-                        if (type == TokenTypes.COMMENT_EOL) {
-                            mark(lex.lineComment, pos, from, to);
+                    lastChunk = chunkTo >= len;
+                    Token t =
+                            tm.getTokenList(
+                                    new Segment(arr, chunkFrom, chunkTo - chunkFrom),
+                                    inState,
+                                    lineStart + chunkFrom);
+                    int endTokenType = inState;
+                    int lastTokenType = inState;
+                    boolean sawEndToken = false;
+                    for (Token x = t; x != null; x = x.getNextToken()) {
+                        int type = x.getType();
+                        if (type == TokenTypes.NULL) {
+                            endTokenType = type;
+                            sawEndToken = true;
+                            continue;
                         }
-                    } else if (type == TokenTypes.MARKUP_TAG_DELIMITER) {
-                        mark(lex.tagDelim, pos, from, to);
+                        lastTokenType = type;
+                        int length = x.length();
+                        if (length <= 0) {
+                            continue;
+                        }
+                        int from = Math.max(0, x.getOffset() - lineStart);
+                        int to = Math.min(len, from + length);
+                        if (isLiteral(type)) {
+                            mark(lex.literal, pos, from, to);
+                            mark(lex.opaque, pos, from, to);
+                        } else if (isComment(type)) {
+                            mark(lex.opaque, pos, from, to);
+                            if (type == TokenTypes.COMMENT_EOL) {
+                                mark(lex.lineComment, pos, from, to);
+                            }
+                        } else if (type == TokenTypes.MARKUP_TAG_DELIMITER) {
+                            mark(lex.tagDelim, pos, from, to);
+                        }
                     }
-                }
+                    // A cut inside the line continues from the token maker's own state; the end of
+                    // a real line keeps the last token type, as before, because some makers treat
+                    // an end-of-line comment state differently on the following line.
+                    state = lastChunk
+                            ? lastTokenType
+                            : (sawEndToken ? endTokenType : lastTokenType);
+                    inState = state;
+                    chunkFrom = chunkTo;
+                } while (!lastChunk);
                 lineStart += len + 1;
                 if (nl < 0) {
                     break;

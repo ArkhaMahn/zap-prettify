@@ -35,9 +35,9 @@ public final class PrettyPrint {
                 case "text/json":
                     return json(body);
                 case "text/xml":
-                    return markup(body, false, styleKey);
+                    return markup(body, false);
                 case "text/html":
-                    return markup(body, true, styleKey);
+                    return markup(body, true);
                 case "text/css":
                     return braces(body, false, styleKey);
                 case "text/javascript":
@@ -613,11 +613,10 @@ public final class PrettyPrint {
         final List<Object> children = new ArrayList<>();
     }
 
-    private static String markup(String s, boolean html, String styleKey) {
-        Lexer lex = Lexer.of(styleKey, s);
-        if (lex == null) {
-            return s;
-        }
+    private static String markup(String s, boolean html) {
+        // Markup is tokenized structurally below; tokenizing it again with an RSTA token maker here
+        // only cost time (and an RSTA markup token maker is quadratic on a single very long line
+        // with many embedded scripts), so it is not done.
         List<Piece> pieces = tokenizeMarkup(s);
         List<Object> tree = buildTree(pieces, html);
         StringBuilder out = new StringBuilder(s.length() + 64);

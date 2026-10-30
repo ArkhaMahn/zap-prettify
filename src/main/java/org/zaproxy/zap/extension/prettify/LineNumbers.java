@@ -20,6 +20,10 @@ public final class LineNumbers {
     public static int[] forDisplay(String raw, String display) {
         String source = raw == null ? "" : raw;
         String text = display == null ? "" : display;
+        if (source.equals(text)) {
+            // No formatter-inserted lines: every row is a message line, numbered in order.
+            return sequential(TextAlignment.countLines(text));
+        }
         int lines = TextAlignment.countLines(text);
         int[] map = new int[lines];
         int rawIndex = 0;

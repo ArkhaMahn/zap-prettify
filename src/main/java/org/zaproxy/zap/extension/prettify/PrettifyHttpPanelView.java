@@ -294,12 +294,19 @@ public class PrettifyHttpPanelView
                             if (gen != generation) {
                                 return;
                             }
+                            // An editable view numbers its rows from the text as it is typed (see
+                            // updateEditableNumbering), so it does not need this full walk.
                             int[] lineNumbers =
-                                    LineNumbers.forDisplay(numbering, split.displayText());
+                                    editable
+                                            ? null
+                                            : LineNumbers.forDisplay(
+                                                    numbering, split.displayText());
                             int maxLineNumber = 1;
-                            for (int lineNumber : lineNumbers) {
-                                if (lineNumber > maxLineNumber) {
-                                    maxLineNumber = lineNumber;
+                            if (lineNumbers != null) {
+                                for (int lineNumber : lineNumbers) {
+                                    if (lineNumber > maxLineNumber) {
+                                        maxLineNumber = lineNumber;
+                                    }
                                 }
                             }
                             if (gen != generation) {
@@ -406,9 +413,9 @@ public class PrettifyHttpPanelView
                     textArea.setMessageText(raw);
                 });
         textArea.applyManagerHighlights();
-        applyLineNumbering(split, lineNumbers, maxLineNumber);
+        int numberedLines = applyLineNumbering(split, lineNumbers, maxLineNumber);
         trackUserEdits();
-        installedDigits = digits(maxLineNumber);
+        installedDigits = digits(numberedLines);
         // The document is the message as it was loaded, so an earlier edit is gone.
         changed = false;
         restoreCaret();
@@ -498,32 +505,32 @@ public class PrettifyHttpPanelView
      * the numbers follow the logical lines as they are typed; a read-only view keeps the raw
      * message numbers, with formatter-inserted lines left blank.
      */
-    private void applyLineNumbering(
+    private int applyLineNumbering(
             DisplayTextSplitter.Split split, int[] lineNumbers, int maxLineNumber) {
         Gutter gutter = scrollPane.getGutter();
         if (gutter == null) {
-            return;
+            return maxLineNumber;
         }
         try {
             if (editable) {
-                updateEditableNumbering();
-            } else {
-                gutter.setLineNumberFormatter(
-                        new PrettifyLineNumberFormatter(lineNumbers, maxLineNumber));
+                return updateEditableNumbering();
             }
+            gutter.setLineNumberFormatter(
+                    new PrettifyLineNumberFormatter(lineNumbers, maxLineNumber));
         } catch (Exception ignored) {
             // Gutter not available (e.g. line numbers disabled) - keep the default numbering.
         }
+        return maxLineNumber;
     }
 
     /**
      * Numbers the non-blank rows of the text being edited, so the gutter keeps following the
      * message's logical lines while the user types. Formatter-inserted blank rows stay unnumbered.
      */
-    private void updateEditableNumbering() {
+    private int updateEditableNumbering() {
         Gutter gutter = scrollPane.getGutter();
         if (gutter == null) {
-            return;
+            return 1;
         }
         String text = textArea.getText();
         int lines = TextAlignment.countLines(text);
@@ -546,6 +553,7 @@ public class PrettifyHttpPanelView
             start = end + 1;
         }
         gutter.setLineNumberFormatter(new PrettifyLineNumberFormatter(numbers, number));
+        return number;
     }
 
     /**

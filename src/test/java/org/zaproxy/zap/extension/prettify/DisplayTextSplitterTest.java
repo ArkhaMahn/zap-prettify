@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import org.fife.ui.rsyntaxtextarea.TokenTypes;
 import org.junit.jupiter.api.Test;
 
 class DisplayTextSplitterTest {
@@ -38,5 +39,31 @@ class DisplayTextSplitterTest {
         assertEquals(raw.indexOf("fgh"), rawStart);
         assertEquals(
                 3, TextAlignment.displayToRawEnd(display, raw, displayStart + 3) - rawStart);
+    }
+
+    @Test
+    void coloursLongStringsSplitAcrossTokenizerChunks() {
+        StringBuilder raw = new StringBuilder("{\"value\":\"");
+        for (int i = 0; i < 20_000; i++) {
+            raw.append((char) ('a' + i % 26));
+        }
+        raw.append("\"}");
+        String text = raw.toString();
+        DisplayTextSplitter.Split split =
+                DisplayTextSplitter.split(text, text, "text/json", 100, ONE_PIXEL);
+        int valueStart = text.indexOf(":\"") + 2;
+        int valueEnd = valueStart + 20_000;
+        int coloured = 0;
+        for (int i = 0; i < split.tokenStarts().length; i++) {
+            int type = split.tokenTypes()[i];
+            for (int k = split.tokenStarts()[i]; k < split.tokenEnds()[i]; k++) {
+                int original = split.toOriginalOffset(k);
+                if (original >= valueStart && original < valueEnd) {
+                    assertEquals(TokenTypes.LITERAL_STRING_DOUBLE_QUOTE, type);
+                    coloured++;
+                }
+            }
+        }
+        assertEquals(20_000, coloured);
     }
 }
