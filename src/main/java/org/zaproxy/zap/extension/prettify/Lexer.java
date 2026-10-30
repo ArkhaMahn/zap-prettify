@@ -16,14 +16,6 @@ import org.fife.ui.rsyntaxtextarea.TokenTypes;
  */
 final class Lexer {
 
-    /**
-     * Longest piece handed to a token maker in one call. RSTA's token list grows in tiny
-     * increments and copies the whole list on every growth, so tokenizing a minified body as one
-     * huge line costs time quadratic in its length. Longer lines are tokenized in chunks with the
-     * carried state.
-     */
-    private static final int TOKENIZE_CHUNK = 8192;
-
     /** String / character / template / regular-expression literals and markup attribute values. */
     final boolean[] literal;
 
@@ -59,6 +51,11 @@ final class Lexer {
         if (tm == null) {
             return null;
         }
+        // Keep a string that a chunk cut leaves open in the string colour on the next chunk, exactly
+        // as the splitter's own tokenization does. The wrapper also reports the token maker's real
+        // carried state, which is what a chunk boundary needs.
+        ContinuedStringTokenMaker wrapped = new ContinuedStringTokenMaker(tm);
+        tm = wrapped;
         Lexer lex = new Lexer(body.length());
         int n = body.length();
         int state = 0;
@@ -77,35 +74,36 @@ final class Lexer {
                 int inState = state;
                 boolean lastChunk;
                 do {
-                    int chunkTo = Math.min(len, chunkFrom + TOKENIZE_CHUNK);
+                    int chunkTo = Math.min(len, chunkFrom + TokenizeChunks.SIZE);
                     // Do not cut a surrogate pair in half; a lone surrogate would tokenize as an
                     // error.
                     if (chunkTo < len && Character.isHighSurrogate(arr[chunkTo - 1])) {
                         chunkTo++;
                     }
+                    chunkTo =
+                            TokenizeChunks.extendForRegex(body, pos + chunkFrom, end, pos + chunkTo)
+                                    - pos;
                     lastChunk = chunkTo >= len;
                     Token t =
                             tm.getTokenList(
                                     new Segment(arr, chunkFrom, chunkTo - chunkFrom),
                                     inState,
                                     lineStart + chunkFrom);
-                    int endTokenType = inState;
-                    int lastTokenType = inState;
-                    boolean sawEndToken = false;
+                    int lastPaintableType = -1;
+                    int lastPaintableEnd = -1;
                     for (Token x = t; x != null; x = x.getNextToken()) {
                         int type = x.getType();
                         if (type == TokenTypes.NULL) {
-                            endTokenType = type;
-                            sawEndToken = true;
                             continue;
                         }
-                        lastTokenType = type;
                         int length = x.length();
                         if (length <= 0) {
                             continue;
                         }
                         int from = Math.max(0, x.getOffset() - lineStart);
                         int to = Math.min(len, from + length);
+                        lastPaintableType = type;
+                        lastPaintableEnd = to;
                         if (isLiteral(type)) {
                             mark(lex.literal, pos, from, to);
                             mark(lex.opaque, pos, from, to);
@@ -118,12 +116,21 @@ final class Lexer {
                             mark(lex.tagDelim, pos, from, to);
                         }
                     }
-                    // A cut inside the line continues from the token maker's own state; the end of
-                    // a real line keeps the last token type, as before, because some makers treat
-                    // an end-of-line comment state differently on the following line.
-                    state = lastChunk
-                            ? lastTokenType
-                            : (sawEndToken ? endTokenType : lastTokenType);
+                    if (!lastChunk
+                            && lastPaintableType == TokenTypes.COMMENT_EOL
+                            && lastPaintableEnd >= chunkTo) {
+                        // A line comment runs to the end of the logical line. The token maker sees
+                        // the end of the chunk as the end of the line, so mark the rest directly
+                        // instead of relying on a carried state.
+                        mark(lex.opaque, pos, chunkTo, len);
+                        mark(lex.lineComment, pos, chunkTo, len);
+                        state = 0;
+                        inState = 0;
+                        break;
+                    }
+                    // The wrapper reports the state the chunk leaves behind: the token maker's own
+                    // carried state, or a marker for a string the cut left open.
+                    state = wrapped.lastState();
                     inState = state;
                     chunkFrom = chunkTo;
                 } while (!lastChunk);

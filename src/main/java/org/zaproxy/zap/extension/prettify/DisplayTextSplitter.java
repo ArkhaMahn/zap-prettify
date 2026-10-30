@@ -42,12 +42,11 @@ public final class DisplayTextSplitter {
     private static final int MIN_CACHED_LINE = 64;
 
     /**
-     * Longest logical line handed to a token maker in one call. RSTA's token list grows in tiny
-     * increments and copies the whole list on every growth, so a very long single line (a minified
-     * payload, for example) tokenizes quadratically. Longer lines are tokenized in chunks with the
-     * carried state, which keeps the cost linear.
+     * State returned by {@link #tokenizeChunk} when a chunk ends inside a line comment. Token makers
+     * treat the end of the segment as the end of the line, so the comment state is not carried by
+     * their end token; the rest of the logical line is filled in directly instead.
      */
-    private static final int TOKENIZE_CHUNK = 8192;
+    private static final int OPEN_LINE_COMMENT = Integer.MIN_VALUE;
 
     /** Approximate limit, in retained characters, of the per-line token cache. */
     private static final long LINE_CACHE_BUDGET = 16L * 1024 * 1024;
@@ -467,7 +466,7 @@ public final class DisplayTextSplitter {
 
     /**
      * Tokenizes the logical line {@code [start, end)} and records its token types and ends in {@code
-     * info}. A line longer than {@link #TOKENIZE_CHUNK} is tokenized in pieces with the token
+     * info}. A line longer than {@link TokenizeChunks#SIZE} is tokenized in pieces with the token
      * maker's state carried across each cut: RSTA's token list grows in tiny increments and copies
      * the whole list on every growth, so handing it one huge line costs time quadratic in the line
      * length.
@@ -485,12 +484,29 @@ public final class DisplayTextSplitter {
         int state = inState;
         int chunkStart = start;
         do {
-            int chunkEnd = Math.min(end, chunkStart + TOKENIZE_CHUNK);
+            int chunkEnd = Math.min(end, chunkStart + TokenizeChunks.SIZE);
             // Do not cut a surrogate pair in half; a lone surrogate would tokenize as an error.
             if (chunkEnd < end && Character.isHighSurrogate(text.charAt(chunkEnd - 1))) {
                 chunkEnd++;
             }
-            state = tokenizeChunk(tokenMaker, http, text, chunkStart, chunkEnd, state, info);
+            chunkEnd = TokenizeChunks.extendForRegex(text, chunkStart, end, chunkEnd);
+            int chunkState = tokenizeChunk(tokenMaker, http, text, chunkStart, chunkEnd, state, info);
+            if (chunkState == OPEN_LINE_COMMENT) {
+                // A line comment runs to the end of the logical line, so the remaining chunks are
+                // all comment. This is not a state the token maker can carry: it sees the end of
+                // its segment as the end of the line.
+                for (int k = chunkEnd; k < end; k++) {
+                    info.tokenType[k] = (byte) TokenTypes.COMMENT_EOL;
+                    info.tokenEnd[k] = end;
+                }
+                state =
+                        http && inState <= HttpTokenMaker.BODY_DETECT
+                                ? HttpTokenMaker.BODY_BASE
+                                : 0;
+                chunkStart = end;
+                break;
+            }
+            state = chunkState;
             chunkStart = chunkEnd;
         } while (chunkStart < end);
         // Only a real line end resets the HTTP header state; a chunk cut inside the line must keep
@@ -515,6 +531,8 @@ public final class DisplayTextSplitter {
         Segment segment = new Segment(chars, 0, len);
         Token nullToken = null;
         int lastType = inState;
+        int lastPaintableType = -1;
+        int lastPaintableEnd = -1;
         int n = text.length();
         for (Token t = tokenMaker.getTokenList(segment, inState, start);
                 t != null;
@@ -534,10 +552,15 @@ public final class DisplayTextSplitter {
                 continue;
             }
             int to = Math.min(n, offset + length);
+            lastPaintableType = type;
+            lastPaintableEnd = to;
             for (int k = offset; k < to; k++) {
                 info.tokenType[k] = (byte) type;
                 info.tokenEnd[k] = to;
             }
+        }
+        if (lastPaintableType == TokenTypes.COMMENT_EOL && lastPaintableEnd >= end) {
+            return OPEN_LINE_COMMENT;
         }
         // The HTTP token maker encodes its carried state in the trailing null token; every other
         // style carries the state the maker reports for the chunk (as RSTA does), which lets a
