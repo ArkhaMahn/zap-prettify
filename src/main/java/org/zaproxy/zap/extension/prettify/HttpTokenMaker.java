@@ -473,6 +473,11 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
         return bodyResolved && bodyTokenMaker != null ? "body:" + bodyStyleKey : null;
     }
 
+    /** Whether the resolved body delegate is a script token maker (JavaScript or TypeScript). */
+    boolean bodyIsScript() {
+        return ContentType.isScriptStyle(bodyStyleKey);
+    }
+
     /** The body's leading text, used to sniff a style when the content type is not decisive. */
     private static String prefixOf(Segment text) {
         if (text == null || text.count <= 0) {

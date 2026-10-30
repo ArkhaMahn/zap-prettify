@@ -7,6 +7,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import javax.swing.text.Segment;
+import org.fife.ui.rsyntaxtextarea.RSyntaxUtilities;
 import org.fife.ui.rsyntaxtextarea.Token;
 import org.fife.ui.rsyntaxtextarea.TokenMaker;
 import org.fife.ui.rsyntaxtextarea.TokenTypes;
@@ -40,13 +41,6 @@ public final class DisplayTextSplitter {
 
     /** Minimum line length worth caching; shorter lines tokenize faster than a cache lookup. */
     private static final int MIN_CACHED_LINE = 64;
-
-    /**
-     * State returned by {@link #tokenizeChunk} when a chunk ends inside a line comment. Token makers
-     * treat the end of the segment as the end of the line, so the comment state is not carried by
-     * their end token; the rest of the logical line is filled in directly instead.
-     */
-    private static final int OPEN_LINE_COMMENT = Integer.MIN_VALUE;
 
     /** Approximate limit, in retained characters, of the per-line token cache. */
     private static final long LINE_CACHE_BUDGET = 16L * 1024 * 1024;
@@ -389,6 +383,7 @@ public final class DisplayTextSplitter {
             return null;
         }
         boolean http = PrettifyTokenMakerFactory.isHttpStyle(style);
+        boolean script = ContentType.isScriptStyle(style);
         // Match the token maker the view's document uses for this style: HTTP messages handle string
         // continuation inside the body delegate, every other style wraps its maker in
         // ContinuedStringTokenMaker so a string that spans display rows keeps the string colour.
@@ -437,7 +432,7 @@ public final class DisplayTextSplitter {
                         System.arraycopy(cached.ends, 0, info.tokenEnd, pos, len);
                         state = cached.outState;
                     } else {
-                        state = tokenizeLine(tokenMaker, http, text, pos, end, inState, info);
+                        state = tokenizeLine(tokenMaker, http, script, text, pos, end, inState, info);
                         if (line != null) {
                             LINE_CACHE.put(
                                     style,
@@ -469,13 +464,15 @@ public final class DisplayTextSplitter {
      * info}. A line longer than {@link TokenizeChunks#SIZE} is tokenized in pieces with the token
      * maker's state carried across each cut: RSTA's token list grows in tiny increments and copies
      * the whole list on every growth, so handing it one huge line costs time quadratic in the line
-     * length.
+     * length. A regular expression that closes beyond the cut makes the piece longer rather than
+     * leaving its body to be read as code.
      *
      * @return the state the line leaves for the next line
      */
     private static int tokenizeLine(
             TokenMaker tokenMaker,
             boolean http,
+            boolean script,
             String text,
             int start,
             int end,
@@ -489,38 +486,50 @@ public final class DisplayTextSplitter {
             if (chunkEnd < end && Character.isHighSurrogate(text.charAt(chunkEnd - 1))) {
                 chunkEnd++;
             }
+            chunkEnd = TokenizeChunks.adjustForSlash(text, end, chunkEnd);
             chunkEnd = TokenizeChunks.extendForRegex(text, chunkStart, end, chunkEnd);
-            int chunkState = tokenizeChunk(tokenMaker, http, text, chunkStart, chunkEnd, state, info);
-            if (chunkState == OPEN_LINE_COMMENT) {
-                // A line comment runs to the end of the logical line, so the remaining chunks are
-                // all comment. This is not a state the token maker can carry: it sees the end of
-                // its segment as the end of the line.
-                for (int k = chunkEnd; k < end; k++) {
-                    info.tokenType[k] = (byte) TokenTypes.COMMENT_EOL;
-                    info.tokenEnd[k] = end;
-                }
-                state =
-                        http && inState <= HttpTokenMaker.BODY_DETECT
-                                ? HttpTokenMaker.BODY_BASE
-                                : 0;
-                chunkStart = end;
-                break;
+            ChunkResult result =
+                    tokenizeChunk(
+                            tokenMaker,
+                            http,
+                            script,
+                            text,
+                            chunkStart,
+                            chunkEnd,
+                            end,
+                            state,
+                            info);
+            while (result.retry) {
+                chunkEnd = result.nextStart;
+                result =
+                        tokenizeChunk(
+                                tokenMaker,
+                                http,
+                                script,
+                                text,
+                                chunkStart,
+                                chunkEnd,
+                                end,
+                                state,
+                                info);
             }
-            state = chunkState;
-            chunkStart = chunkEnd;
+            state = result.state;
+            chunkStart = result.nextStart;
         } while (chunkStart < end);
         // Only a real line end resets the HTTP header state; a chunk cut inside the line must keep
         // the construct state so the next chunk resumes it.
         return http ? HttpTokenMaker.resetAfterLine(state) : state;
     }
 
-    /** Tokenizes one chunk of a line and returns the state at its end. */
-    private static int tokenizeChunk(
+    /** Tokenizes one chunk of a line and returns where tokenization resumes and the state there. */
+    private static ChunkResult tokenizeChunk(
             TokenMaker tokenMaker,
             boolean http,
+            boolean script,
             String text,
             int start,
             int end,
+            int lineEnd,
             int inState,
             TokenInfo info) {
         int len = end - start;
@@ -529,14 +538,19 @@ public final class DisplayTextSplitter {
             text.getChars(start, end, chars, 0);
         }
         Segment segment = new Segment(chars, 0, len);
+        Token list = tokenMaker.getTokenList(segment, inState, start);
+        boolean scriptHere =
+                script
+                        || (http
+                                && tokenMaker instanceof HttpTokenMaker
+                                && ((HttpTokenMaker) tokenMaker).bodyIsScript());
         Token nullToken = null;
         int lastType = inState;
         int lastPaintableType = -1;
         int lastPaintableEnd = -1;
         int n = text.length();
-        for (Token t = tokenMaker.getTokenList(segment, inState, start);
-                t != null;
-                t = t.getNextToken()) {
+        Token lastSignificant = null;
+        for (Token t = list; t != null; t = t.getNextToken()) {
             int type = t.getType();
             if (type == TokenTypes.NULL) {
                 nullToken = t;
@@ -552,25 +566,97 @@ public final class DisplayTextSplitter {
                 continue;
             }
             int to = Math.min(n, offset + length);
+
+            if (scriptHere
+                    && type == TokenTypes.OPERATOR
+                    && length == 1
+                    && t.charAt(0) == '/'
+                    && RSyntaxUtilities.regexCanFollowInJavaScript(lastSignificant)) {
+                int closer = TokenizeChunks.findClosingSlash(text, offset + 1, lineEnd);
+                if (closer >= end) {
+                    // The literal closes beyond this chunk. Re-tokenize with the closing slash
+                    // included; the whole literal is one token, so the larger chunk is cheap.
+                    return ChunkResult.retry(closer + 1);
+                }
+                if (closer < 0) {
+                    // An unclosed literal: mark the rest of the line directly. Feeding it to the
+                    // token maker would read it as code and grow the token list quadratically.
+                    for (int k = offset; k < lineEnd; k++) {
+                        info.tokenType[k] = (byte) TokenTypes.REGEX;
+                        info.tokenEnd[k] = lineEnd;
+                    }
+                    return ChunkResult.lineEnd(
+                            lineEnd,
+                            http && inState <= HttpTokenMaker.BODY_DETECT
+                                    ? HttpTokenMaker.BODY_BASE
+                                    : 0);
+                }
+                // The closer is inside the chunk, so the token maker saw it and still chose
+                // division. Leave its decision alone.
+            }
+
             lastPaintableType = type;
             lastPaintableEnd = to;
             for (int k = offset; k < to; k++) {
                 info.tokenType[k] = (byte) type;
                 info.tokenEnd[k] = to;
             }
+            if (t.isPaintable() && !t.isComment() && !t.isWhitespace()) {
+                lastSignificant = t;
+            }
         }
         if (lastPaintableType == TokenTypes.COMMENT_EOL && lastPaintableEnd >= end) {
-            return OPEN_LINE_COMMENT;
+            // A line comment runs to the end of the logical line. The token maker sees the end of
+            // the chunk as the end of the line, so fill the rest directly instead of relying on a
+            // carried state.
+            for (int k = end; k < lineEnd; k++) {
+                info.tokenType[k] = (byte) TokenTypes.COMMENT_EOL;
+                info.tokenEnd[k] = lineEnd;
+            }
+            return ChunkResult.lineEnd(
+                    lineEnd,
+                    http && inState <= HttpTokenMaker.BODY_DETECT
+                            ? HttpTokenMaker.BODY_BASE
+                            : 0);
         }
         // The HTTP token maker encodes its carried state in the trailing null token; every other
         // style carries the state the maker reports for the chunk (as RSTA does), which lets a
         // multi-line string or comment keep its state across rows and chunk cuts.
+        int state;
         if (http) {
-            return nullToken != null ? nullToken.getType() : lastType;
+            state = nullToken != null ? nullToken.getType() : lastType;
+        } else {
+            state =
+                    tokenMaker instanceof ContinuedStringTokenMaker
+                            ? ((ContinuedStringTokenMaker) tokenMaker).lastState()
+                            : tokenMaker.getLastTokenTypeOnLine(segment, inState);
         }
-        return tokenMaker instanceof ContinuedStringTokenMaker
-                ? ((ContinuedStringTokenMaker) tokenMaker).lastState()
-                : tokenMaker.getLastTokenTypeOnLine(segment, inState);
+        return ChunkResult.done(end, state);
+    }
+
+    /** Result of tokenizing one chunk. */
+    private static final class ChunkResult {
+        final int nextStart;
+        final int state;
+        final boolean retry;
+
+        private ChunkResult(int nextStart, int state, boolean retry) {
+            this.nextStart = nextStart;
+            this.state = state;
+            this.retry = retry;
+        }
+
+        static ChunkResult done(int nextStart, int state) {
+            return new ChunkResult(nextStart, state, false);
+        }
+
+        static ChunkResult retry(int nextStart) {
+            return new ChunkResult(nextStart, 0, true);
+        }
+
+        static ChunkResult lineEnd(int lineEnd, int state) {
+            return new ChunkResult(lineEnd, state, false);
+        }
     }
 
     /** One tokenized line: per-character token types/ends relative to the line start, and the

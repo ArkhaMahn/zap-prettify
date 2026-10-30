@@ -2,6 +2,7 @@ package org.zaproxy.zap.extension.prettify;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.fife.ui.rsyntaxtextarea.TokenTypes;
@@ -108,5 +109,128 @@ class DisplayTextSplitterTest {
             }
         }
         assertEquals(3, coloured);
+    }
+
+    @Test
+    void coloursLongRegexSplitAcrossTokenizerChunks() {
+        String text = "var r=/" + "x".repeat(20_000) + "/;var b=2;";
+        int start = text.indexOf('/') + 1;
+        int end = start + 20_000;
+        DisplayTextSplitter.Split split =
+                DisplayTextSplitter.split(text, text, "text/javascript", 100, ONE_PIXEL);
+        int coloured = 0;
+        for (int i = 0; i < split.tokenStarts().length; i++) {
+            int type = split.tokenTypes()[i];
+            for (int k = split.tokenStarts()[i]; k < split.tokenEnds()[i]; k++) {
+                int original = split.toOriginalOffset(k);
+                if (original >= start && original < end) {
+                    assertEquals(TokenTypes.REGEX, type);
+                    coloured++;
+                }
+            }
+        }
+        assertEquals(20_000, coloured);
+    }
+
+    @Test
+    void coloursLongRegexWhenTheChunkEndsOnAnEscapedSlash() {
+        String text =
+                "var r=/" + "x".repeat(8185) + "\\/" + "y".repeat(20_000) + "/;var b=2;";
+        int start = text.indexOf('/') + 1;
+        int end = text.indexOf("/;var b");
+        DisplayTextSplitter.Split split =
+                DisplayTextSplitter.split(text, text, "text/javascript", 100, ONE_PIXEL);
+        int coloured = 0;
+        for (int i = 0; i < split.tokenStarts().length; i++) {
+            int type = split.tokenTypes()[i];
+            for (int k = split.tokenStarts()[i]; k < split.tokenEnds()[i]; k++) {
+                int original = split.toOriginalOffset(k);
+                if (original >= start && original <= end) {
+                    assertEquals(TokenTypes.REGEX, type);
+                    coloured++;
+                }
+            }
+        }
+        assertEquals(end - start + 1, coloured);
+    }
+
+    @Test
+    void coloursAnUnclosedLongRegexToTheEndOfTheLine() {
+        String text = "var r=/" + "x".repeat(20_000);
+        int start = text.indexOf('/') + 1;
+        DisplayTextSplitter.Split split =
+                DisplayTextSplitter.split(text, text, "text/javascript", 100, ONE_PIXEL);
+        int coloured = 0;
+        for (int i = 0; i < split.tokenStarts().length; i++) {
+            int type = split.tokenTypes()[i];
+            for (int k = split.tokenStarts()[i]; k < split.tokenEnds()[i]; k++) {
+                int original = split.toOriginalOffset(k);
+                if (original >= start) {
+                    assertEquals(TokenTypes.REGEX, type);
+                    coloured++;
+                }
+            }
+        }
+        assertEquals(text.length() - start, coloured);
+    }
+
+    @Test
+    void coloursLineCommentWhoseOpenerIsSplitAtAChunkBoundary() {
+        String text = "x".repeat(TokenizeChunks.SIZE - 1) + "// " + "y".repeat(100);
+        int start = TokenizeChunks.SIZE - 1;
+        DisplayTextSplitter.Split split =
+                DisplayTextSplitter.split(text, text, "text/javascript", 100, ONE_PIXEL);
+        int coloured = 0;
+        for (int i = 0; i < split.tokenStarts().length; i++) {
+            int type = split.tokenTypes()[i];
+            for (int k = split.tokenStarts()[i]; k < split.tokenEnds()[i]; k++) {
+                int original = split.toOriginalOffset(k);
+                if (original >= start) {
+                    assertEquals(TokenTypes.COMMENT_EOL, type);
+                    coloured++;
+                }
+            }
+        }
+        assertEquals(text.length() - start, coloured);
+    }
+
+    @Test
+    void coloursLineCommentAtAChunkBoundaryWhenAnEarlierSlashIsInTheChunk() {
+        String text = "var r=/abc/;" + "x".repeat(8180) + "// comment";
+        int start = TokenizeChunks.SIZE;
+        assertTrue(text.startsWith("//", start), "comment opens at the chunk boundary");
+        DisplayTextSplitter.Split split =
+                DisplayTextSplitter.split(text, text, "text/javascript", 100, ONE_PIXEL);
+        int coloured = 0;
+        for (int i = 0; i < split.tokenStarts().length; i++) {
+            int type = split.tokenTypes()[i];
+            for (int k = split.tokenStarts()[i]; k < split.tokenEnds()[i]; k++) {
+                int original = split.toOriginalOffset(k);
+                if (original >= start) {
+                    assertEquals(TokenTypes.COMMENT_EOL, type);
+                    coloured++;
+                }
+            }
+        }
+        assertEquals(text.length() - start, coloured);
+    }
+
+    @Test
+    void doesNotColourDivisionAfterWhitespaceAtAChunkBoundaryAsRegex() {
+        String text = "x".repeat(TokenizeChunks.SIZE) + "   / y;";
+        int slash = text.indexOf('/');
+        DisplayTextSplitter.Split split =
+                DisplayTextSplitter.split(text, text, "text/javascript", 100, ONE_PIXEL);
+        boolean seen = false;
+        for (int i = 0; i < split.tokenStarts().length; i++) {
+            int type = split.tokenTypes()[i];
+            for (int k = split.tokenStarts()[i]; k < split.tokenEnds()[i]; k++) {
+                if (split.toOriginalOffset(k) == slash) {
+                    assertNotEquals(TokenTypes.REGEX, type);
+                    seen = true;
+                }
+            }
+        }
+        assertTrue(seen, "the slash is tokenized");
     }
 }
