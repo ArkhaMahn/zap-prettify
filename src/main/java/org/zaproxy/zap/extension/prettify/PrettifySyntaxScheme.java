@@ -39,7 +39,7 @@ public class PrettifySyntaxScheme extends SyntaxScheme {
         set(TokenTypes.COMMENT_KEYWORD, comment);
         set(TokenTypes.COMMENT_MARKUP, comment);
         set(TokenTypes.RESERVED_WORD, reserved);
-        set(7, text);
+        set(TokenTypes.RESERVED_WORD_2, text);
         set(TokenTypes.FUNCTION, function);
         set(TokenTypes.LITERAL_BOOLEAN, bool);
         set(TokenTypes.LITERAL_NUMBER_DECIMAL_INT, number);

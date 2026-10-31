@@ -3,6 +3,7 @@ package org.zaproxy.zap.extension.prettify;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
@@ -218,5 +219,56 @@ class TextAlignmentTest {
         String raw = "a=1&b=2";
         String edited = raw.replace("b=2", "b=9");
         assertEquals("a=1&b=9", TextAlignment.applyEditToRaw(raw, raw, edited));
+    }
+
+    @Test
+    void mapperMatchesTheStaticMappingInBothDirections() {
+        TextAlignment.Mapper mapper = TextAlignment.mapper(FORMATTED_JSON, RAW_JSON);
+        for (int i = 0; i <= FORMATTED_JSON.length(); i++) {
+            assertEquals(
+                    TextAlignment.displayToRaw(FORMATTED_JSON, RAW_JSON, i),
+                    mapper.displayToRaw(i),
+                    "display start " + i);
+            assertEquals(
+                    TextAlignment.displayToRawEnd(FORMATTED_JSON, RAW_JSON, i),
+                    mapper.displayToRawEnd(i),
+                    "display end " + i);
+        }
+        for (int i = 0; i <= RAW_JSON.length(); i++) {
+            assertEquals(
+                    TextAlignment.rawToDisplay(RAW_JSON, FORMATTED_JSON, i),
+                    mapper.rawToDisplay(i),
+                    "raw start " + i);
+            assertEquals(
+                    TextAlignment.rawToDisplayEnd(RAW_JSON, FORMATTED_JSON, i),
+                    mapper.rawToDisplayEnd(i),
+                    "raw end " + i);
+        }
+    }
+
+    @Test
+    void mapperResetsItsCursorWhenCallsMoveBackwards() {
+        TextAlignment.Mapper mapper = TextAlignment.mapper(FORMATTED_JSON, RAW_JSON);
+        int last = FORMATTED_JSON.length();
+        assertEquals(
+                TextAlignment.displayToRaw(FORMATTED_JSON, RAW_JSON, last),
+                mapper.displayToRaw(last));
+        int first = FORMATTED_JSON.indexOf("\"a\"");
+        assertEquals(
+                TextAlignment.displayToRaw(FORMATTED_JSON, RAW_JSON, first),
+                mapper.displayToRaw(first));
+        int rawLast = RAW_JSON.length();
+        assertEquals(
+                TextAlignment.rawToDisplay(RAW_JSON, FORMATTED_JSON, rawLast),
+                mapper.rawToDisplay(rawLast));
+        assertEquals(
+                TextAlignment.rawToDisplay(RAW_JSON, FORMATTED_JSON, 0),
+                mapper.rawToDisplay(0));
+    }
+
+    @Test
+    void mapperIsNullForTextsThatDoNotAlign() {
+        assertNull(TextAlignment.mapper(RAW_JSON, RAW_JSON.replace("1", "9")));
+        assertNull(TextAlignment.mapper(null, RAW_JSON));
     }
 }

@@ -96,6 +96,15 @@ public class PrettifyTextArea extends RSyntaxTextArea {
     /** Notified when the Look and Feel (and therefore the colour scheme) changed. */
     private final List<Runnable> themeListeners = new CopyOnWriteArrayList<>();
 
+    /**
+     * ZAP's highlighter listener, registered while the text area is displayed. Keeping the listener
+     * in a field lets {@link #removeNotify()} unregister the exact instance instead of leaking it
+     * (and this view) for every view ever created.
+     */
+    private HighlighterManager.HighlighterManagerListener highlighterListener;
+
+    private boolean highlighterRegistered;
+
     /** The font {@link #cachedAdvance} was measured for, so a font change remeasures it. */
     private Font advanceFont;
 
@@ -230,7 +239,6 @@ public class PrettifyTextArea extends RSyntaxTextArea {
         // cut/copy/paste menu, which otherwise replaces it as soon as the text is not editable.
         setPopupMenu(null);
         initialized = true;
-        initHighlighter();
     }
 
     /** Turns word wrap on or off as the user configured it; applied only while editable. */
@@ -347,8 +355,12 @@ public class PrettifyTextArea extends RSyntaxTextArea {
         if (start >= end) {
             return selected;
         }
-        int rawStart = TextAlignment.displayToRaw(display, rawText, start);
-        int rawEnd = TextAlignment.displayToRawEnd(display, rawText, end);
+        TextAlignment.Mapper mapper = TextAlignment.mapper(display, rawText);
+        if (mapper == null) {
+            return selected;
+        }
+        int rawStart = mapper.displayToRaw(start);
+        int rawEnd = mapper.displayToRawEnd(end);
         if (rawStart < 0 || rawEnd < 0 || rawStart >= rawEnd) {
             return selected;
         }
@@ -383,27 +395,52 @@ public class PrettifyTextArea extends RSyntaxTextArea {
         highlightAll();
     }
 
-    private void initHighlighter() {
-        HighlighterManager highlighter = HighlighterManager.getInstance();
-        if (highlighter == null) {
-            return;
+    @Override
+    public void addNotify() {
+        super.addNotify();
+        if (!highlighterRegistered) {
+            HighlighterManager manager = HighlighterManager.getInstance();
+            if (manager != null) {
+                if (highlighterListener == null) {
+                    highlighterListener = this::highlighterChanged;
+                }
+                manager.addHighlighterManagerListener(highlighterListener);
+                highlighterRegistered = true;
+            }
         }
-        highlighter.addHighlighterManagerListener(
-                e -> {
-                    switch (e.getType()) {
-                        case HIGHLIGHTS_SET:
-                        case HIGHLIGHT_REMOVED:
-                            getHighlighter().removeAllHighlights();
-                            highlightAll();
-                            break;
-                        case HIGHLIGHT_ADDED:
-                            highlightEntry(e.getHighlight());
-                            break;
-                        default:
-                            break;
-                    }
-                    repaint();
-                });
+        // Highlights may have been added or removed while the view was hidden.
+        applyManagerHighlights();
+    }
+
+    @Override
+    public void removeNotify() {
+        if (highlighterRegistered) {
+            HighlighterManager manager = HighlighterManager.getInstance();
+            if (manager != null && highlighterListener != null) {
+                manager.removeHighlighterManagerListener(highlighterListener);
+            }
+            highlighterRegistered = false;
+        }
+        super.removeNotify();
+    }
+
+    private void highlighterChanged(HighlighterManager.HighlighterManagerEvent e) {
+        switch (e.getType()) {
+            case HIGHLIGHTS_SET:
+            case HIGHLIGHT_REMOVED:
+                Highlighter highlighter = getHighlighter();
+                if (highlighter != null) {
+                    highlighter.removeAllHighlights();
+                }
+                highlightAll();
+                break;
+            case HIGHLIGHT_ADDED:
+                highlightEntry(e.getHighlight(), getText());
+                break;
+            default:
+                break;
+        }
+        repaint();
     }
 
     private void highlightAll() {
@@ -411,12 +448,14 @@ public class PrettifyTextArea extends RSyntaxTextArea {
         if (highlighter == null) {
             return;
         }
+        // One document copy for all entries; highlightEntry must not re-read it per entry.
+        String text = getText();
         for (HighlightSearchEntry entry : highlighter.getHighlights()) {
-            highlightEntry(entry);
+            highlightEntry(entry, text);
         }
     }
 
-    private void highlightEntry(HighlightSearchEntry entry) {
+    private void highlightEntry(HighlightSearchEntry entry, String text) {
         if (entry == null
                 || entry.getToken() == null
                 || entry.getToken().isEmpty()
@@ -424,7 +463,6 @@ public class PrettifyTextArea extends RSyntaxTextArea {
             return;
         }
         String token = entry.getToken();
-        String text = getText();
         Highlighter highlighter = getHighlighter();
         if (text == null || highlighter == null) {
             return;

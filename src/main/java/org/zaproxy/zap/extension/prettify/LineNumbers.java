@@ -31,11 +31,14 @@ public final class LineNumbers {
         int displayLine = 0;
         int lastNumbered = 0;
         boolean seenOnLine = false;
+        // Consecutive blank display lines land on the same raw pointer, so cache the (expensive)
+        // blank-line probe instead of rescanning the same two raw lines for each of them.
+        int[] blankCache = {-1, -1, 0};
         for (int i = 0; i < text.length(); i++) {
             char c = text.charAt(i);
             if (c == '\n') {
                 if (!seenOnLine) {
-                    int blank = blankRawLineAt(source, rawIndex, rawLine);
+                    int blank = blankRawLineAt(source, rawIndex, rawLine, blankCache);
                     if (blank > 0 && blank != lastNumbered) {
                         map[displayLine] = blank;
                         lastNumbered = blank;
@@ -72,7 +75,7 @@ public final class LineNumbers {
             }
         }
         if (!seenOnLine) {
-            int blank = blankRawLineAt(source, rawIndex, rawLine);
+            int blank = blankRawLineAt(source, rawIndex, rawLine, blankCache);
             if (blank > 0 && blank != lastNumbered) {
                 map[displayLine] = blank;
             }
@@ -88,6 +91,22 @@ public final class LineNumbers {
             numbers[i] = i + 1;
         }
         return numbers;
+    }
+
+    /**
+     * Cached variant of {@link #blankRawLineAt(String, int, int)}. The cache holds one entry in the
+     * form {@code {rawIndex, rawLine, result}}; consecutive blank display lines are the case that
+     * matters.
+     */
+    private static int blankRawLineAt(String raw, int rawIndex, int rawLine, int[] cache) {
+        if (cache[0] == rawIndex && cache[1] == rawLine) {
+            return cache[2];
+        }
+        int result = blankRawLineAt(raw, rawIndex, rawLine);
+        cache[0] = rawIndex;
+        cache[1] = rawLine;
+        cache[2] = result;
+        return result;
     }
 
     /**

@@ -1,5 +1,6 @@
 package org.zaproxy.zap.extension.prettify;
 
+import java.util.Locale;
 import javax.swing.text.Segment;
 import org.fife.ui.rsyntaxtextarea.AbstractTokenMaker;
 import org.fife.ui.rsyntaxtextarea.Token;
@@ -325,7 +326,7 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
 
     /** Decides, from the accumulated header field name, how its value is tokenised. */
     private int startHeaderValue() {
-        String name = hdrName.toString().trim().toLowerCase();
+        String name = hdrName.toString().trim().toLowerCase(Locale.ROOT);
         if ("cookie".equals(name) || "set-cookie".equals(name)) {
             finalizeContentType();
             contentTypeHeader = false;

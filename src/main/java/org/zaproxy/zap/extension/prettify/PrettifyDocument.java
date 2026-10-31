@@ -33,6 +33,13 @@ import org.fife.ui.rsyntaxtextarea.TokenTypes;
  */
 public class PrettifyDocument extends RSyntaxDocument {
 
+    /**
+     * How much of the message is read when locating the end of the header block. Headers are
+     * normally small, but cookies, authentication tokens and custom metadata can make them much
+     * larger than the old 8 KB limit, and a body that looks like a header would then be misread.
+     */
+    private static final int MAX_HEADER_SCAN = 64 * 1024;
+
     private final int[] tokenStarts;
     private final int[] tokenEnds;
     private final int[] tokenTypes;
@@ -402,7 +409,7 @@ public class PrettifyDocument extends RSyntaxDocument {
     private int bodyStart() {
         String head;
         try {
-            head = getText(0, Math.min(getLength(), 8192));
+            head = getText(0, Math.min(getLength(), MAX_HEADER_SCAN));
         } catch (BadLocationException e) {
             return -1;
         }
@@ -418,7 +425,7 @@ public class PrettifyDocument extends RSyntaxDocument {
     private String headerBlock() {
         try {
             String head =
-                    getText(0, Math.min(getLength(), 8192))
+                    getText(0, Math.min(getLength(), MAX_HEADER_SCAN))
                             .toLowerCase(java.util.Locale.ROOT);
             int separator = head.indexOf("\r\n\r\n");
             if (separator < 0) {

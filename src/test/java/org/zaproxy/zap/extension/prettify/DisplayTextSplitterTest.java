@@ -26,7 +26,7 @@ class DisplayTextSplitterTest {
     void continuationRowsAreNotNumbered() {
         String raw = "abcdefghij";
         DisplayTextSplitter.Split split =
-                DisplayTextSplitter.split(raw, raw, null, 5, ONE_PIXEL);
+                DisplayTextSplitter.split(raw, 5, ONE_PIXEL);
         assertArrayEquals(new int[] {1, 0}, LineNumbers.forDisplay(raw, split.displayText()));
     }
 
@@ -46,7 +46,7 @@ class DisplayTextSplitterTest {
     void capsContinuationIndentOnAMostlyWhitespaceLine() {
         String text = " ".repeat(1_000) + "x".repeat(1_000);
         DisplayTextSplitter.Split split =
-                DisplayTextSplitter.split(text, text, "text/javascript", 100, ONE_PIXEL);
+                DisplayTextSplitter.split(text, "text/javascript", 100, ONE_PIXEL);
         assertTrue(
                 split.displayText().length() < text.length() * 4,
                 "the display stays proportional to the input");
@@ -64,7 +64,7 @@ class DisplayTextSplitterTest {
         raw.append("\"}");
         String text = raw.toString();
         DisplayTextSplitter.Split split =
-                DisplayTextSplitter.split(text, text, "text/json", 100, ONE_PIXEL);
+                DisplayTextSplitter.split(text, "text/json", 100, ONE_PIXEL);
         int valueStart = text.indexOf(":\"") + 2;
         int valueEnd = valueStart + 20_000;
         int coloured = 0;
@@ -85,7 +85,7 @@ class DisplayTextSplitterTest {
     void coloursLongLineCommentsSplitAcrossTokenizerChunks() {
         String text = "var a=1; // " + "x".repeat(20_000) + "\nvar b=2;";
         DisplayTextSplitter.Split split =
-                DisplayTextSplitter.split(text, text, "text/javascript", 100, ONE_PIXEL);
+                DisplayTextSplitter.split(text, "text/javascript", 100, ONE_PIXEL);
         int commentStart = text.indexOf("// ") + 3;
         int commentEnd = commentStart + 20_000;
         int coloured = 0;
@@ -109,7 +109,7 @@ class DisplayTextSplitterTest {
         assertTrue(slash < TokenizeChunks.SIZE);
         assertTrue(slash + 5 > TokenizeChunks.SIZE);
         DisplayTextSplitter.Split split =
-                DisplayTextSplitter.split(text, text, "text/javascript", 100, ONE_PIXEL);
+                DisplayTextSplitter.split(text, "text/javascript", 100, ONE_PIXEL);
         int coloured = 0;
         for (int i = 0; i < split.tokenStarts().length; i++) {
             int type = split.tokenTypes()[i];
@@ -130,7 +130,7 @@ class DisplayTextSplitterTest {
         int start = text.indexOf('/') + 1;
         int end = start + 20_000;
         DisplayTextSplitter.Split split =
-                DisplayTextSplitter.split(text, text, "text/javascript", 100, ONE_PIXEL);
+                DisplayTextSplitter.split(text, "text/javascript", 100, ONE_PIXEL);
         int coloured = 0;
         for (int i = 0; i < split.tokenStarts().length; i++) {
             int type = split.tokenTypes()[i];
@@ -152,7 +152,7 @@ class DisplayTextSplitterTest {
         int start = text.indexOf('/') + 1;
         int end = text.indexOf("/;var b");
         DisplayTextSplitter.Split split =
-                DisplayTextSplitter.split(text, text, "text/javascript", 100, ONE_PIXEL);
+                DisplayTextSplitter.split(text, "text/javascript", 100, ONE_PIXEL);
         int coloured = 0;
         for (int i = 0; i < split.tokenStarts().length; i++) {
             int type = split.tokenTypes()[i];
@@ -172,7 +172,7 @@ class DisplayTextSplitterTest {
         String text = "var r=/" + "x".repeat(20_000);
         int start = text.indexOf('/') + 1;
         DisplayTextSplitter.Split split =
-                DisplayTextSplitter.split(text, text, "text/javascript", 100, ONE_PIXEL);
+                DisplayTextSplitter.split(text, "text/javascript", 100, ONE_PIXEL);
         int coloured = 0;
         for (int i = 0; i < split.tokenStarts().length; i++) {
             int type = split.tokenTypes()[i];
@@ -192,7 +192,7 @@ class DisplayTextSplitterTest {
         String text = "x".repeat(TokenizeChunks.SIZE - 1) + "// " + "y".repeat(100);
         int start = TokenizeChunks.SIZE - 1;
         DisplayTextSplitter.Split split =
-                DisplayTextSplitter.split(text, text, "text/javascript", 100, ONE_PIXEL);
+                DisplayTextSplitter.split(text, "text/javascript", 100, ONE_PIXEL);
         int coloured = 0;
         for (int i = 0; i < split.tokenStarts().length; i++) {
             int type = split.tokenTypes()[i];
@@ -213,7 +213,7 @@ class DisplayTextSplitterTest {
         int start = TokenizeChunks.SIZE;
         assertTrue(text.startsWith("//", start), "comment opens at the chunk boundary");
         DisplayTextSplitter.Split split =
-                DisplayTextSplitter.split(text, text, "text/javascript", 100, ONE_PIXEL);
+                DisplayTextSplitter.split(text, "text/javascript", 100, ONE_PIXEL);
         int coloured = 0;
         for (int i = 0; i < split.tokenStarts().length; i++) {
             int type = split.tokenTypes()[i];
@@ -233,7 +233,7 @@ class DisplayTextSplitterTest {
         String text = "x".repeat(TokenizeChunks.SIZE) + "   / y;";
         int slash = text.indexOf('/');
         DisplayTextSplitter.Split split =
-                DisplayTextSplitter.split(text, text, "text/javascript", 100, ONE_PIXEL);
+                DisplayTextSplitter.split(text, "text/javascript", 100, ONE_PIXEL);
         boolean seen = false;
         for (int i = 0; i < split.tokenStarts().length; i++) {
             int type = split.tokenTypes()[i];

@@ -32,7 +32,7 @@ Prettify adds syntax-highlighted "Pretty" views to the OWASP ZAP HTTP request an
 4. Click `Install`
 
 ### Manual Installation
-1. Download the `.zap` add-on file from the [releases page](https://github.com/your-username/prettify-addon/releases)
+1. Download the `.zap` add-on file from the [releases page](https://github.com/ArkhaMahn/zap-prettify/releases)
 2. Open OWASP ZAP
 3. Go to `File` → `Load Add-on File...`
 4. Select the downloaded `.zap` file
@@ -48,8 +48,8 @@ Prettify adds syntax-highlighted "Pretty" views to the OWASP ZAP HTTP request an
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/prettify-addon.git
-cd prettify-addon
+git clone https://github.com/ArkhaMahn/zap-prettify.git
+cd zap-prettify
 
 # Build the add-on
 ./gradlew build
@@ -106,4 +106,4 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## Support
 
-For issues, bug reports, or feature requests, please use the [GitHub Issues](https://github.com/your-username/prettify-addon/issues) page.
+For issues, bug reports, or feature requests, please use the [GitHub Issues](https://github.com/ArkhaMahn/zap-prettify/issues) page.

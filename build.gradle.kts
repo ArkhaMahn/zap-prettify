@@ -26,12 +26,12 @@ dependencies {
 
 zapAddOn {
     addOnName.set("Prettify")
-    addOnStatus.set(AddOnStatus.ALPHA)
+    addOnStatus.set(AddOnStatus.BETA)
     zapVersion.set("2.17.0")
 
     manifest {
-        author.set("Prettify")
-        url.set("https://github.com/")
+        author.set("ArkhaMahn")
+        url.set("https://github.com/ArkhaMahn/zap-prettify")
         bundle {
             baseName.set("org.zaproxy.zap.extension.prettify.resources.Messages")
             prefix.set("prettify")

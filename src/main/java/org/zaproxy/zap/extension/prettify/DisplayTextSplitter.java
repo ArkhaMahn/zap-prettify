@@ -49,6 +49,13 @@ public final class DisplayTextSplitter {
     private static final long LINE_CACHE_BUDGET = 16L * 1024 * 1024;
 
     /**
+     * Text longer than this skips span recording. Recording a type and an end for every character
+     * costs several times the message size in memory; a huge body is shown correctly by falling
+     * back to the document's own (chunked) tokenization instead.
+     */
+    static final int MAX_TOKEN_SPAN_CHARS = 16 * 1024 * 1024;
+
+    /**
      * Tokenized lines, shared by every split. The same message is split once per view (headers,
      * body, whole message), so the expensive bodies are tokenized once and reused instead of once
      * per view.
@@ -56,6 +63,11 @@ public final class DisplayTextSplitter {
     private static final LineCache LINE_CACHE = new LineCache(LINE_CACHE_BUDGET);
 
     private DisplayTextSplitter() {}
+
+    /** Drops the shared token cache so an unloaded add-on leaves no retained text behind. */
+    static void clearCache() {
+        LINE_CACHE.clear();
+    }
 
     /** Supplies the rendered width, in pixels, of a single code point. */
     public interface CharWidths {
@@ -75,38 +87,20 @@ public final class DisplayTextSplitter {
 
     /**
      * Splits {@code string} into display lines like {@link #split(String, int, CharWidths)}, but
-     * derives the gutter line numbers from {@code numberingSource} instead of from {@code string}.
-     *
-     * <p>This is used when {@code string} is a reformatted (pretty-printed) view of {@code
-     * numberingSource}: the pretty-printer only inserts and reflows whitespace, so the two texts
-     * have the same non-whitespace characters in the same order. Walking them together lets the
-     * gutter keep the <em>original</em> message line numbers - one number per original line, on its
-     * first display row - instead of numbering every line the formatter produced.
-     *
-     * @param numberingSource the original text whose line numbers the gutter should show; if null
-     *     or equal to {@code string} the normal (split) numbering is used
-     */
-    public static Split split(
-            String string, String numberingSource, int maxWidth, CharWidths widths) {
-        return split(string, numberingSource, null, maxWidth, widths);
-    }
-
-    /**
-     * Splits {@code string} into display lines like {@link #split(String, String, int, CharWidths)},
-     * but aware of {@code style}'s tokens so the wrapped view is coloured like the unwrapped one.
+     * aware of {@code style}'s tokens so the wrapped view is coloured like the unwrapped one.
      * Breaks sit at the exact width (filling every row), and when a break falls inside a token the
      * rows it spans are recorded with that token's original type, so {@link PrettifyDocument} paints
      * the fragments correctly instead of showing whatever a per-line tokenizer would make of them.
      * When {@code style} is null (or has no token maker) the usual tokenizer-based colouring applies.
      */
     public static Split split(
-            String string, String numberingSource, String style, int maxWidth, CharWidths widths) {
+            String string, String style, int maxWidth, CharWidths widths) {
         if (maxWidth <= 0 || widths == null) {
             return split(string);
         }
         if (string == null || string.isEmpty()) {
             String s = string == null ? "" : string;
-            return new Split(s, s, new int[0], numberingSource);
+            return new Split(s, s, new int[0]);
         }
         List<Integer> breakOffsets = new ArrayList<>();
         List<Integer> breakIndents = new ArrayList<>();
@@ -173,8 +167,7 @@ public final class DisplayTextSplitter {
                 toIntArray(breakIndents),
                 toIntArray(tokenStarts),
                 toIntArray(tokenEnds),
-                toIntArray(tokenTypes),
-                numberingSource);
+                toIntArray(tokenTypes));
     }
 
     private static void appendLineByWidth(
@@ -376,7 +369,7 @@ public final class DisplayTextSplitter {
      */
     private static TokenInfo tokenInfo(
             String text, String style, java.util.BitSet wrappedLines) {
-        if (style == null) {
+        if (style == null || text.length() > MAX_TOKEN_SPAN_CHARS) {
             return null;
         }
         TokenMaker tokenMaker;
@@ -755,6 +748,12 @@ public final class DisplayTextSplitter {
                 it.remove();
             }
         }
+
+        /** Drops every cached line, for example when the add-on is unloaded. */
+        synchronized void clear() {
+            entries.clear();
+            retained = 0;
+        }
     }
 
     /** Per-character original token information used to recolour wrap breaks. */
@@ -803,54 +802,8 @@ public final class DisplayTextSplitter {
     }
 
     /**
-     * Splits {@code string} into display lines no longer than {@code columns} characters, keeping
-     * whole existing lines and CR/LF pairs. If {@code columns} is not positive this falls back to
-     * {@link #split(String)}.
+     * Splits {@code string} using fixed chunk lengths, ignoring the view width.
      */
-    public static Split split(String string, int columns) {
-        if (columns <= 0) {
-            return split(string);
-        }
-        if (string == null || string.isEmpty()) {
-            String s = string == null ? "" : string;
-            return new Split(s, s, new int[0]);
-        }
-        List<Integer> breakOffsets = new ArrayList<>();
-        int n = string.length();
-        StringBuilder display = new StringBuilder(n + n / columns + 16);
-        int lineStart = 0;
-        for (int i = 0; i < n; i++) {
-            // Only '\n' (and '\r\n') separates lines; a lone '\r' is ordinary content.
-            if (string.charAt(i) == '\n') {
-                appendLineByColumns(string, lineStart, i, columns, display, breakOffsets);
-                display.append('\n');
-                lineStart = i + 1;
-            }
-        }
-        appendLineByColumns(string, lineStart, n, columns, display, breakOffsets);
-        return new Split(display.toString(), string, toIntArray(breakOffsets));
-    }
-
-    private static void appendLineByColumns(
-            String string,
-            int start,
-            int end,
-            int columns,
-            StringBuilder display,
-            List<Integer> breakOffsets) {
-        int s = start;
-        while (s < end) {
-            int e = Math.min(end, s + columns);
-            display.append(string, s, e);
-            if (e < end) {
-                breakOffsets.add(display.length());
-                display.append('\n');
-            }
-            s = e;
-        }
-    }
-
-    /** Splits {@code string} using fixed chunk lengths, ignoring the view width. */
     public static Split split(String string) {
         if (string == null || string.isEmpty()) {
             String s = string == null ? "" : string;
@@ -973,221 +926,6 @@ public final class DisplayTextSplitter {
         return trimmed;
     }
 
-    /**
-     * Builds, for every display line (0-based), the 1-based number of the original message line it
-     * belongs to, or {@code 0} if the line is a continuation produced by an inserted break. The
-     * gutter uses this so wrapped/inserted rows are not numbered - only real message lines are.
-     */
-    private static int[] buildDisplayLineNumbers(String displayText, int[] breakOffsets) {
-        int n = displayText.length();
-        int lines = 1;
-        for (int i = 0; i < n; i++) {
-            if (displayText.charAt(i) == '\n') {
-                lines++;
-            }
-        }
-        int[] numbers = new int[lines];
-        numbers[0] = 1;
-        int originalLine = 1;
-        int breakIndex = 0;
-        int lineIndex = 0;
-        for (int i = 0; i < n; i++) {
-            if (displayText.charAt(i) != '\n') {
-                continue;
-            }
-            boolean injected = breakIndex < breakOffsets.length && breakOffsets[breakIndex] == i;
-            if (injected) {
-                breakIndex++;
-            }
-            lineIndex++;
-            if (injected) {
-                numbers[lineIndex] = 0;
-            } else {
-                originalLine++;
-                numbers[lineIndex] = originalLine;
-            }
-        }
-        return numbers;
-    }
-
-    private static int countOriginalLines(int[] displayLineNumbers) {
-        int max = 1;
-        for (int n : displayLineNumbers) {
-            if (n > max) {
-                max = n;
-            }
-        }
-        return max;
-    }
-
-    /**
-     * Picks the per-display-line numbers: when {@code numberingSource} is the same text that was
-     * split (the normal case) the numbers follow the display text's own newlines. When it differs
-     * (the split text is a pretty-printed view of it) the numbers are taken from the original text
-     * by aligning the two on their non-whitespace characters.
-     */
-    private static int[] computeDisplayLineNumbers(
-            String displayText, String splitText, int[] breakOffsets, String numberingSource) {
-        if (numberingSource == null || numberingSource.equals(splitText)) {
-            return buildDisplayLineNumbers(displayText, breakOffsets);
-        }
-        int[] formattedLineToOriginal = mapFormattedToOriginal(splitText, numberingSource);
-        if (formattedLineToOriginal == null) {
-            return buildDisplayLineNumbers(displayText, breakOffsets);
-        }
-        return lineNumbersFromMap(displayText, breakOffsets, formattedLineToOriginal);
-    }
-
-    /**
-     * Maps every line of {@code formatted} (0-based) to the 1-based line of {@code source} its first
-     * non-whitespace character came from, or {@code 0} for a line with no non-whitespace character.
-     *
-     * <p>The pretty-printer only ever adds, removes or reflows whitespace, so the two texts share
-     * the same non-whitespace characters in the same order; walking them together recovers which
-     * source line each formatted line belongs to. Returns {@code null} if they diverge (a formatter
-     * that is not whitespace-only), so callers fall back to ordinary numbering.
-     */
-    private static int[] mapFormattedToOriginal(String formatted, String source) {
-        int lines = 1;
-        for (int i = 0; i < formatted.length(); i++) {
-            if (formatted.charAt(i) == '\n') {
-                lines++;
-            }
-        }
-        int[] map = new int[lines];
-        int n = source.length();
-        int sourceIndex = 0;
-        int sourceLine = 1;
-        int formattedLine = 0;
-        boolean seenOnLine = false;
-        for (int i = 0; i < formatted.length(); i++) {
-            char c = formatted.charAt(i);
-            if (c == '\n') {
-                if (!seenOnLine) {
-                    // A line with no content: the blank line that ends the header block is a line
-                    // of the message like any other and is numbered, while a blank line the pretty
-                    // printer added inside a body is not.
-                    int blank = blankSourceLineAt(source, sourceIndex, sourceLine);
-                    if (blank > 0) {
-                        map[formattedLine] = blank;
-                        sourceLine = blank;
-                        sourceIndex = blankLineEnd(source, sourceIndex);
-                    }
-                }
-                formattedLine++;
-                seenOnLine = false;
-                continue;
-            }
-            if (Character.isWhitespace(c)) {
-                continue;
-            }
-            while (sourceIndex < n && Character.isWhitespace(source.charAt(sourceIndex))) {
-                if (source.charAt(sourceIndex) == '\n') {
-                    sourceLine++;
-                }
-                sourceIndex++;
-            }
-            if (sourceIndex >= n || source.charAt(sourceIndex) != c) {
-                return null;
-            }
-            sourceIndex++;
-            if (!seenOnLine) {
-                map[formattedLine] = sourceLine;
-                seenOnLine = true;
-            }
-        }
-        return map;
-    }
-
-    /**
-     * The line of the source a blank line of the formatted text stands for, or 0 when there is
-     * none: the line after the one the source pointer is on, but only when that line is blank too.
-     */
-    private static int blankSourceLineAt(String source, int sourceIndex, int sourceLine) {
-        int n = source.length();
-        int index = sourceIndex;
-        while (index < n && source.charAt(index) != '\n') {
-            if (!Character.isWhitespace(source.charAt(index))) {
-                return 0;
-            }
-            index++;
-        }
-        if (index >= n) {
-            return 0;
-        }
-        index++;
-        int end = index;
-        while (end < n && source.charAt(end) != '\n') {
-            if (!Character.isWhitespace(source.charAt(end))) {
-                return 0;
-            }
-            end++;
-        }
-        // The line holds nothing but whitespace, so it is a blank line of the message.
-        return sourceLine + 1;
-    }
-
-    /** Offset just past the blank line the source pointer is on. */
-    private static int blankLineEnd(String source, int sourceIndex) {
-        int n = source.length();
-        int index = sourceIndex;
-        while (index < n && source.charAt(index) != '\n') {
-            index++;
-        }
-        return index < n ? index + 1 : n;
-    }
-
-
-    /**
-     * Builds the per-display-line numbers from a formatted-line-to-original-line map: a display row
-     * is numbered only when it starts a formatted line that in turn starts a new original line, so
-     * each original message line is numbered exactly once (on its first display row) and every
-     * reformat and wrap continuation row is left blank.
-     */
-    private static int[] lineNumbersFromMap(
-            String displayText, int[] breakOffsets, int[] formattedLineToOriginal) {
-        int n = displayText.length();
-        int lines = 1;
-        for (int i = 0; i < n; i++) {
-            if (displayText.charAt(i) == '\n') {
-                lines++;
-            }
-        }
-        int[] numbers = new int[lines];
-        int previousOriginal = 0;
-        if (formattedLineToOriginal.length > 0 && formattedLineToOriginal[0] != 0) {
-            numbers[0] = formattedLineToOriginal[0];
-            previousOriginal = numbers[0];
-        }
-        int formattedLine = 0;
-        int breakIndex = 0;
-        int lineIndex = 0;
-        for (int i = 0; i < n; i++) {
-            if (displayText.charAt(i) != '\n') {
-                continue;
-            }
-            boolean injected = breakIndex < breakOffsets.length && breakOffsets[breakIndex] == i;
-            if (injected) {
-                breakIndex++;
-            } else {
-                formattedLine++;
-            }
-            lineIndex++;
-            if (injected) {
-                continue;
-            }
-            int original =
-                    formattedLine < formattedLineToOriginal.length
-                            ? formattedLineToOriginal[formattedLine]
-                            : 0;
-            if (original != 0 && original != previousOriginal) {
-                numbers[lineIndex] = original;
-                previousOriginal = original;
-            }
-        }
-        return numbers;
-    }
-
     /** The display text plus everything needed to map offsets back to the original text. */
     public static final class Split {
 
@@ -1198,40 +936,16 @@ public final class DisplayTextSplitter {
         private final int[] tokenStarts;
         private final int[] tokenEnds;
         private final int[] tokenTypes;
-        /** Text whose line numbers the gutter should show; may be null (use {@link #originalText}). */
-        private final String numberingSource;
-
-        /**
-         * Lazily computed, because the view numbers the rows itself and most splits never ask for
-         * this. Computing it eagerly walked the whole text again on every render.
-         */
-        private int[] displayLineNumbers;
-
-        private int originalLineCount;
 
         Split(String displayText, String originalText, int[] breakOffsets) {
-            this(displayText, originalText, breakOffsets, new int[breakOffsets.length], originalText);
-        }
-
-        Split(String displayText, String originalText, int[] breakOffsets, String numberingSource) {
-            this(displayText, originalText, breakOffsets, new int[breakOffsets.length], numberingSource);
-        }
-
-        Split(
-                String displayText,
-                String originalText,
-                int[] breakOffsets,
-                int[] breakIndents,
-                String numberingSource) {
             this(
                     displayText,
                     originalText,
                     breakOffsets,
-                    breakIndents,
+                    new int[breakOffsets.length],
                     new int[0],
                     new int[0],
-                    new int[0],
-                    numberingSource);
+                    new int[0]);
         }
 
         Split(
@@ -1241,8 +955,7 @@ public final class DisplayTextSplitter {
                 int[] breakIndents,
                 int[] tokenStarts,
                 int[] tokenEnds,
-                int[] tokenTypes,
-                String numberingSource) {
+                int[] tokenTypes) {
             this.displayText = displayText;
             this.originalText = originalText;
             this.breakOffsets = breakOffsets;
@@ -1250,7 +963,6 @@ public final class DisplayTextSplitter {
             this.tokenStarts = tokenStarts;
             this.tokenEnds = tokenEnds;
             this.tokenTypes = tokenTypes;
-            this.numberingSource = numberingSource;
         }
 
         public String displayText() {
@@ -1259,10 +971,6 @@ public final class DisplayTextSplitter {
 
         public String originalText() {
             return originalText;
-        }
-
-        public int addedBreaks() {
-            return breakOffsets.length;
         }
 
         /**
@@ -1279,81 +987,6 @@ public final class DisplayTextSplitter {
          */
         public int[] breakIndents() {
             return breakIndents;
-        }
-
-        /**
-         * Turns text edited in the wrapped display back into message text: the line breaks this
-         * split inserted (and the indentation it copied onto the continuation rows) are taken out
-         * again, so what is left is the message as it was, with the user's changes.
-         *
-         * <p>The edited text is matched against the display text that was installed: the unchanged
-         * head and tail of the two are known to correspond, so the breaks in them can be located
-         * and removed, while the part the user actually changed is kept as they typed it.
-         */
-        public String toMessageText(String edited) {
-            if (edited == null) {
-                return null;
-            }
-            if (edited.equals(displayText)) {
-                return edited;
-            }
-            int prefix = 0;
-            int limit = Math.min(displayText.length(), edited.length());
-            while (prefix < limit && displayText.charAt(prefix) == edited.charAt(prefix)) {
-                prefix++;
-            }
-            int suffix = 0;
-            while (suffix < limit - prefix
-                    && displayText.charAt(displayText.length() - 1 - suffix)
-                            == edited.charAt(edited.length() - 1 - suffix)) {
-                suffix++;
-            }
-            int[] inserted = insertedOffsets();
-            StringBuilder out = new StringBuilder(edited.length());
-            appendUnwrapped(out, edited, 0, prefix, 0, inserted);
-            out.append(edited, prefix, edited.length() - suffix);
-            appendUnwrapped(
-                    out,
-                    edited,
-                    edited.length() - suffix,
-                    edited.length(),
-                    displayText.length() - suffix,
-                    inserted);
-            return out.toString();
-        }
-
-        /** Offsets of the characters the split inserted: the breaks and their indentation. */
-        private int[] insertedOffsets() {
-            int count = 0;
-            for (int i = 0; i < breakOffsets.length; i++) {
-                count += 1 + (i < breakIndents.length ? breakIndents[i] : 0);
-            }
-            int[] inserted = new int[count];
-            int at = 0;
-            for (int i = 0; i < breakOffsets.length; i++) {
-                inserted[at++] = breakOffsets[i];
-                int indent = i < breakIndents.length ? breakIndents[i] : 0;
-                for (int j = 1; j <= indent; j++) {
-                    inserted[at++] = breakOffsets[i] + j;
-                }
-            }
-            Arrays.sort(inserted);
-            return inserted;
-        }
-
-        /**
-         * Appends the edited text, skipping the characters the split inserted. The edited range
-         * {@code [from, to)} corresponds to the display range starting at {@code displayFrom}.
-         */
-        private static void appendUnwrapped(
-                StringBuilder out, String edited, int from, int to, int displayFrom, int[] inserted) {
-            for (int i = from; i < to; i++) {
-                int displayOffset = displayFrom + (i - from);
-                if (Arrays.binarySearch(inserted, displayOffset) >= 0) {
-                    continue;
-                }
-                out.append(edited.charAt(i));
-            }
         }
 
         /**
@@ -1376,27 +1009,6 @@ public final class DisplayTextSplitter {
         }
 
         /**
-         * For each 0-based display line, the 1-based original message line it belongs to, or {@code
-         * 0} if it is a continuation row created by a break.
-         */
-        public synchronized int[] displayLineNumbers() {
-            if (displayLineNumbers == null) {
-                displayLineNumbers =
-                        computeDisplayLineNumbers(
-                                displayText, originalText, breakOffsets, numberingSource);
-            }
-            return displayLineNumbers;
-        }
-
-        /** Number of lines the original (unsplit) message has. */
-        public synchronized int originalLineCount() {
-            if (originalLineCount == 0) {
-                originalLineCount = countOriginalLines(displayLineNumbers());
-            }
-            return originalLineCount;
-        }
-
-        /**
          * Maps a display offset back to the offset in the untouched original text, dropping every
          * character the split inserted - both the line breaks and the indentation copied onto the
          * continuation rows.
@@ -1416,23 +1028,6 @@ public final class DisplayTextSplitter {
                 }
             }
             return offset - dropped;
-        }
-
-        /** Maps an original offset forward to the offset in the display text. */
-        public int toDisplayOffset(int offset) {
-            int original = Math.max(0, Math.min(offset, originalText.length()));
-            int display = original;
-            int injectedBefore = 0;
-            for (int i = 0; i < breakOffsets.length; i++) {
-                int originalAtBreak = breakOffsets[i] - injectedBefore;
-                if (originalAtBreak > original) {
-                    break;
-                }
-                int block = 1 + indentAt(i);
-                display += block;
-                injectedBefore += block;
-            }
-            return Math.min(display, displayText.length());
         }
 
         private int indentAt(int breakIndex) {

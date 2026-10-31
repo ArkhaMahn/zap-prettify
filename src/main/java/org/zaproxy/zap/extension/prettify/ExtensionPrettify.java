@@ -52,7 +52,7 @@ public class ExtensionPrettify extends ExtensionAdaptor {
 
     @Override
     public String getAuthor() {
-        return "Prettify";
+        return "ArkhaMahn";
     }
 
     @Override
@@ -123,29 +123,34 @@ public class ExtensionPrettify extends ExtensionAdaptor {
 
     @Override
     public void unload() {
-        if (getView() == null) {
-            return;
+        if (getView() != null) {
+            HttpPanelManager panelManager = HttpPanelManager.getInstance();
+            // Drop the factories first so panels stop being offered a "Pretty" view, then detach
+            // the instances already mounted on the open request/response panels. Both steps are
+            // required: the view removal is what makes the tab disappear immediately, without a
+            // restart.
+            safe(() -> panelManager.removeRequestViewFactory("RequestSplit", VIEW_REQUEST_SPLIT_HEADER), "request header view factory");
+            safe(() -> panelManager.removeRequestViewFactory("RequestSplit", VIEW_REQUEST_SPLIT_BODY), "request body view factory");
+            safe(() -> panelManager.removeResponseViewFactory("ResponseSplit", VIEW_RESPONSE_SPLIT_HEADER), "response header view factory");
+            safe(() -> panelManager.removeResponseViewFactory("ResponseSplit", VIEW_RESPONSE_SPLIT_BODY), "response body view factory");
+            safe(() -> panelManager.removeRequestViewFactory("RequestAll", VIEW_REQUEST_ALL), "request view factory");
+            safe(() -> panelManager.removeResponseViewFactory("ResponseAll", VIEW_RESPONSE_ALL), "response view factory");
+
+            safe(() -> panelManager.removeRequestViews("RequestSplit", VIEW_REQUEST_SPLIT_HEADER, RequestSplitComponent.ViewComponent.HEADER), "request header views");
+            safe(() -> panelManager.removeRequestViews("RequestSplit", VIEW_REQUEST_SPLIT_BODY, RequestSplitComponent.ViewComponent.BODY), "request body views");
+            safe(() -> panelManager.removeResponseViews("ResponseSplit", VIEW_RESPONSE_SPLIT_HEADER, RequestSplitComponent.ViewComponent.HEADER), "response header views");
+            safe(() -> panelManager.removeResponseViews("ResponseSplit", VIEW_RESPONSE_SPLIT_BODY, RequestSplitComponent.ViewComponent.BODY), "response body views");
+            safe(() -> panelManager.removeRequestViews("RequestAll", VIEW_REQUEST_ALL, null), "request views");
+            safe(() -> panelManager.removeResponseViews("ResponseAll", VIEW_RESPONSE_ALL, null), "response views");
         }
-        HttpPanelManager panelManager = HttpPanelManager.getInstance();
-        // Drop the factories first so panels stop being offered a "Pretty" view, then detach the
-        // instances already mounted on the open request/response panels. Both steps are required:
-        // the view removal is what makes the tab disappear immediately, without a restart.
-        safe(() -> panelManager.removeRequestViewFactory("RequestSplit", VIEW_REQUEST_SPLIT_HEADER), "request header view factory");
-        safe(() -> panelManager.removeRequestViewFactory("RequestSplit", VIEW_REQUEST_SPLIT_BODY), "request body view factory");
-        safe(() -> panelManager.removeResponseViewFactory("ResponseSplit", VIEW_RESPONSE_SPLIT_HEADER), "response header view factory");
-        safe(() -> panelManager.removeResponseViewFactory("ResponseSplit", VIEW_RESPONSE_SPLIT_BODY), "response body view factory");
-        safe(() -> panelManager.removeRequestViewFactory("RequestAll", VIEW_REQUEST_ALL), "request view factory");
-        safe(() -> panelManager.removeResponseViewFactory("ResponseAll", VIEW_RESPONSE_ALL), "response view factory");
-
-        safe(() -> panelManager.removeRequestViews("RequestSplit", VIEW_REQUEST_SPLIT_HEADER, RequestSplitComponent.ViewComponent.HEADER), "request header views");
-        safe(() -> panelManager.removeRequestViews("RequestSplit", VIEW_REQUEST_SPLIT_BODY, RequestSplitComponent.ViewComponent.BODY), "request body views");
-        safe(() -> panelManager.removeResponseViews("ResponseSplit", VIEW_RESPONSE_SPLIT_HEADER, RequestSplitComponent.ViewComponent.HEADER), "response header views");
-        safe(() -> panelManager.removeResponseViews("ResponseSplit", VIEW_RESPONSE_SPLIT_BODY, RequestSplitComponent.ViewComponent.BODY), "response body views");
-        safe(() -> panelManager.removeRequestViews("RequestAll", VIEW_REQUEST_ALL, null), "request views");
-        safe(() -> panelManager.removeResponseViews("ResponseAll", VIEW_RESPONSE_ALL, null), "response views");
-
+        // These are process-wide resources that may have been created even when no view was ever
+        // shown (for example by a headless or partial hook, or by a background split still in
+        // flight), so their cleanup must not depend on getView().
         PrettifyTextActions.remove();
         PrettifyExecutor.shutdown();
+        // Clear the cache after stopping the workers so a finishing split cannot immediately
+        // repopulate it.
+        DisplayTextSplitter.clearCache();
     }
 
     /** Runs one removal, logging and continuing on failure so unload cannot stop half-way. */

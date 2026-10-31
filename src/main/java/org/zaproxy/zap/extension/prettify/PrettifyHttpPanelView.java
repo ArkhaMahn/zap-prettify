@@ -8,8 +8,12 @@ import java.awt.Insets;
 import java.awt.event.ComponentAdapter;
 import java.awt.event.ComponentEvent;
 import java.awt.font.FontRenderContext;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.swing.JComponent;
@@ -20,7 +24,10 @@ import javax.swing.SwingUtilities;
 import javax.swing.Timer;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
+import javax.swing.text.BadLocationException;
 import javax.swing.text.Document;
+import javax.swing.text.Element;
+import javax.swing.text.Segment;
 import org.apache.commons.configuration.FileConfiguration;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -141,6 +148,12 @@ public class PrettifyHttpPanelView
     /** Guards against re-entering {@link #dataChanged} while ZAP's body fix-up is applied. */
     private boolean adjustingBody;
 
+    /** Whether a coalesced editable-gutter rebuild is already queued on the EDT. */
+    private boolean editableNumberingPending;
+
+    /** One-shot check that re-validates the wrap width after a new document has been laid out. */
+    private Timer installCheck;
+
     /**
      * The request body the view last showed. ZAP moves the body into the query string when the
      * method changes away from POST and moves it back when it changes to POST; on the way back a
@@ -154,10 +167,22 @@ public class PrettifyHttpPanelView
 
     private String configurationKey = "";
 
-    /** The per-code-point widths of the last font, so a resize does not re-measure the font. */
-    private Font charWidthsFont;
+    /**
+     * Per-code-point rendered widths shared by every view that paints with the same font. A font
+     * table is expensive to measure and identical across views, so the few fonts in use are kept
+     * in a small access-ordered cache instead of allocating one table per view.
+     */
+    private static final int CHAR_WIDTH_CACHE_SIZE = 8;
 
-    private DisplayTextSplitter.CharWidths charWidths;
+    private static final Map<Font, FontCharWidths> CHAR_WIDTHS =
+            new LinkedHashMap<Font, FontCharWidths>(4, 0.75f, true) {
+                private static final long serialVersionUID = 1L;
+
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<Font, FontCharWidths> eldest) {
+                    return size() > CHAR_WIDTH_CACHE_SIZE;
+                }
+            };
 
     public PrettifyHttpPanelView(
             String name,
@@ -245,8 +270,12 @@ public class PrettifyHttpPanelView
 
     /** Remembers the caret and scroll position in the text that is about to be replaced. */
     private void capturePosition() {
-        pendingCaretCount =
-                TextAlignment.nonWhitespaceBefore(textArea.getText(), textArea.getCaretPosition());
+        int caret = textArea.getCaretPosition();
+        // A read-only view's document is exactly displaySource, so mapping the caret does not need
+        // a full copy of the document. An editable view may hold unsaved text, so it still reads
+        // the document. The caret is usually at the top, where no scan is needed.
+        String source = editable ? textArea.getText() : displaySource;
+        pendingCaretCount = caret <= 0 ? 0 : TextAlignment.nonWhitespaceBefore(source, caret);
         pendingScrollValue = scrollPane.getVerticalScrollBar().getValue();
     }
 
@@ -274,69 +303,76 @@ public class PrettifyHttpPanelView
         PrettifyExecutor.get()
                 .submit(
                         () -> {
-                            // A resize can queue several splits. A superseded one returns before
-                            // doing any work, and the checks between the expensive steps stop one
-                            // that is already running as soon as a newer split arrives.
-                            if (gen != generation) {
-                                return;
+                            try {
+                                prepareAndInstall(
+                                        raw, contentType, stripTrailing, numbering, widthPx, widths, gen);
+                            } catch (RuntimeException | OutOfMemoryError e) {
+                                // Preparing a huge message can fail (for example when the heap cannot
+                                // hold the spans, the formatted text and the document at once). Keep
+                                // the previous document instead of letting the executor swallow it.
+                                LOGGER.warn(
+                                        "Could not prepare the message view; keeping the previous document.",
+                                        e);
                             }
-                            String display = projection(raw, contentType, stripTrailing);
-                            if (gen != generation) {
-                                return;
-                            }
-                            String style = styleFor(contentType, display);
-                            DisplayTextSplitter.Split split =
-                                    editable
-                                            ? new DisplayTextSplitter.Split(
-                                                    display, display, new int[0], numbering)
-                                            : DisplayTextSplitter.split(
-                                                    display, numbering, style, widthPx, widths);
-                            if (gen != generation) {
-                                return;
-                            }
-                            // An editable view numbers its rows from the text as it is typed (see
-                            // updateEditableNumbering), so it does not need this full walk.
-                            int[] lineNumbers =
-                                    editable
-                                            ? null
-                                            : LineNumbers.forDisplay(
-                                                    numbering, split.displayText());
-                            int maxLineNumber = 1;
-                            if (lineNumbers != null) {
-                                for (int lineNumber : lineNumbers) {
-                                    if (lineNumber > maxLineNumber) {
-                                        maxLineNumber = lineNumber;
-                                    }
-                                }
-                            }
-                            if (gen != generation) {
-                                return;
-                            }
-                            RSyntaxDocument document =
-                                    ChunkedTextLoader.buildDocument(
-                                            split.displayText(),
-                                            style,
-                                            split,
-                                            () -> gen != generation,
-                                            editable);
-                            if (document == null) {
-                                return;
-                            }
-                            final int installedLineCount = maxLineNumber;
-                            SwingUtilities.invokeLater(
-                                    () -> {
-                                        if (gen != generation) {
-                                            return;
-                                        }
-                                        install(
-                                                raw,
-                                                split,
-                                                lineNumbers,
-                                                installedLineCount,
-                                                document,
-                                                gen);
-                                    });
                         });
+    }
+
+    /** Does the off-EDT formatting, splitting and document build for one generation. */
+    private void prepareAndInstall(
+            String raw,
+            String contentType,
+            boolean stripTrailing,
+            String numbering,
+            int widthPx,
+            DisplayTextSplitter.CharWidths widths,
+            long gen) {
+        // A resize can queue several splits. A superseded one returns before doing any work, and
+        // the checks between the expensive steps stop one that is already running as soon as a
+        // newer split arrives.
+        if (gen != generation) {
+            return;
+        }
+        String display = projection(raw, contentType, stripTrailing);
+        if (gen != generation) {
+            return;
+        }
+        String style = styleFor(contentType, display);
+        DisplayTextSplitter.Split split =
+                editable
+                        ? new DisplayTextSplitter.Split(display, display, new int[0])
+                        : DisplayTextSplitter.split(display, style, widthPx, widths);
+        if (gen != generation) {
+            return;
+        }
+        // An editable view numbers its rows from the text as it is typed (see
+        // updateEditableNumbering), so it does not need this full walk.
+        int[] lineNumbers =
+                editable ? null : LineNumbers.forDisplay(numbering, split.displayText());
+        int maxLineNumber = 1;
+        if (lineNumbers != null) {
+            for (int lineNumber : lineNumbers) {
+                if (lineNumber > maxLineNumber) {
+                    maxLineNumber = lineNumber;
+                }
+            }
+        }
+        if (gen != generation) {
+            return;
+        }
+        RSyntaxDocument document =
+                ChunkedTextLoader.buildDocument(
+                        split.displayText(), style, split, () -> gen != generation, editable);
+        if (document == null) {
+            return;
+        }
+        final int installedLineCount = maxLineNumber;
+        SwingUtilities.invokeLater(
+                () -> {
+                    if (gen != generation) {
+                        return;
+                    }
+                    install(raw, split, lineNumbers, installedLineCount, document);
+                });
     }
 
     /**
@@ -400,8 +436,7 @@ public class PrettifyHttpPanelView
             DisplayTextSplitter.Split split,
             int[] lineNumbers,
             int maxLineNumber,
-            RSyntaxDocument document,
-            long gen) {
+            RSyntaxDocument document) {
         rawText = raw;
         displaySource = split.displayText();
         shownMessage = model.getMessage();
@@ -422,16 +457,19 @@ public class PrettifyHttpPanelView
         restoreScroll();
         rememberBody();
         // The document is laid out once the pending revalidation has run; only then does the text
-        // area report the width it can really paint in.
-        Timer check =
-                new Timer(
-                        30,
-                        e -> {
-                            calibrateGutter();
-                            correctWrapWidth(gen);
-                        });
-        check.setRepeats(false);
-        check.start();
+        // area report the width it can really paint in. One reusable timer avoids leaving a burst
+        // of installs with an equal burst of pending timers.
+        if (installCheck == null) {
+            installCheck =
+                    new Timer(
+                            30,
+                            e -> {
+                                calibrateGutter();
+                                correctWrapWidth(generation);
+                            });
+            installCheck.setRepeats(false);
+        }
+        installCheck.restart();
     }
 
     /**
@@ -449,7 +487,7 @@ public class PrettifyHttpPanelView
                     public void insertUpdate(DocumentEvent e) {
                         changed = true;
                         if (editable) {
-                            updateEditableNumbering();
+                            scheduleEditableNumbering();
                         }
                     }
 
@@ -457,7 +495,7 @@ public class PrettifyHttpPanelView
                     public void removeUpdate(DocumentEvent e) {
                         changed = true;
                         if (editable) {
-                            updateEditableNumbering();
+                            scheduleEditableNumbering();
                         }
                     }
 
@@ -476,7 +514,10 @@ public class PrettifyHttpPanelView
         int count = pendingCaretCount;
         pendingCaretCount = -1;
         try {
-            int offset = TextAlignment.offsetAfterNonWhitespace(textArea.getText(), count);
+            int offset =
+                    count <= 0
+                            ? 0
+                            : TextAlignment.offsetAfterNonWhitespace(displaySource, count);
             textArea.setCaretPosition(Math.min(offset, textArea.getDocument().getLength()));
         } catch (Exception ignored) {
             // The document changed; leave the caret where it is.
@@ -528,40 +569,78 @@ public class PrettifyHttpPanelView
      * message's logical lines while the user types. Formatter-inserted blank rows stay unnumbered.
      */
     private int updateEditableNumbering() {
+        editableNumberingPending = false;
         Gutter gutter = scrollPane.getGutter();
         if (gutter == null) {
             return 1;
         }
-        String text = textArea.getText();
-        int lines = TextAlignment.countLines(text);
+        Document document = textArea.getDocument();
+        if (document == null) {
+            return 1;
+        }
+        Element root = document.getDefaultRootElement();
+        int lines = root.getElementCount();
         int[] numbers = new int[lines];
         int number = 0;
-        int start = 0;
+        Segment segment = new Segment();
         for (int i = 0; i < lines; i++) {
-            int end = text.indexOf('\n', start);
-            if (end < 0) {
-                end = text.length();
-            }
+            Element line = root.getElement(i);
+            int start = line.getStartOffset();
+            int end = Math.max(start, line.getEndOffset() - 1);
             boolean blank = true;
-            for (int j = start; j < end; j++) {
-                if (!Character.isWhitespace(text.charAt(j))) {
-                    blank = false;
-                    break;
+            try {
+                if (end > start) {
+                    // Reading through the document's own segment avoids copying the whole document
+                    // on every keystroke.
+                    document.getText(start, end - start, segment);
+                    for (int k = segment.offset; k < segment.offset + segment.count; k++) {
+                        if (!Character.isWhitespace(segment.array[k])) {
+                            blank = false;
+                            break;
+                        }
+                    }
                 }
+            } catch (BadLocationException | RuntimeException e) {
+                blank = false;
             }
             numbers[i] = blank ? 0 : ++number;
-            start = end + 1;
         }
         gutter.setLineNumberFormatter(new PrettifyLineNumberFormatter(numbers, number));
         return number;
     }
 
     /**
-     * Wrap width predicted from the current viewport and the line-number gutter the new message
-     * will need, or 0 while either is unknown. Using the current extent directly would size the
-     * split for the previous message's gutter (its digit count differs), and the installed
-     * document would then have to be re-wrapped once the new gutter had been laid out. The vertical
-     * scrollbar is always shown, so the extent minus the gutter is the only changing part.
+     * Coalesces the gutter rebuild for a burst of document events (and for a single edit that
+     * produces insert+remove events) into one rebuild once the current event has been handled.
+     */
+    private void scheduleEditableNumbering() {
+        if (editableNumberingPending) {
+            return;
+        }
+        editableNumberingPending = true;
+        SwingUtilities.invokeLater(
+                () -> {
+                    if (!editableNumberingPending) {
+                        return;
+                    }
+                    if (editable) {
+                        updateEditableNumbering();
+                    } else {
+                        // The view became read-only while the rebuild was queued; clear the flag so
+                        // a later editable install can schedule again.
+                        editableNumberingPending = false;
+                    }
+                });
+    }
+
+    /**
+     * Wrap width predicted from the current viewport and the line-number gutter the current
+     * document has, or 0 while either is unknown. Using the current extent directly would size the
+     * split for the previous message's gutter (its digit count differs). The digit count is taken
+     * from the installed document rather than from a full scan of the new message: crossing a digit
+     * boundary is corrected by {@link #correctWrapWidth} after layout, which is much cheaper than
+     * scanning a potentially huge message on the Event Dispatch Thread. The vertical scrollbar is
+     * always shown, so the extent minus the gutter is the only changing part.
      */
     private int predictedWrapWidthPx() {
         int extentWidth = scrollPane.getViewport().getExtentSize().width;
@@ -570,7 +649,8 @@ public class PrettifyHttpPanelView
         if (extentWidth <= 0 || currentGutterWidth <= 0) {
             return 0;
         }
-        int gutterWidth = predictedGutterWidth(predictedLineNumberDigits());
+        int digits = installedDigits > 0 ? installedDigits : 1;
+        int gutterWidth = predictedGutterWidth(digits);
         if (gutterWidth <= 0) {
             return 0;
         }
@@ -633,23 +713,6 @@ public class PrettifyHttpPanelView
     }
 
     /** Line-number digits the message being shown will need. */
-    private int predictedLineNumberDigits() {
-        String data = model.getData();
-        if (data == null) {
-            return 1;
-        }
-        if (shouldStripTrailingNewlines(model.getMessage())) {
-            data = stripTrailingNewlines(data);
-        }
-        int lines = 1;
-        for (int i = 0; i < data.length(); i++) {
-            if (data.charAt(i) == '\n') {
-                lines++;
-            }
-        }
-        return digits(lines);
-    }
-
     private static int digits(int value) {
         return Math.max(1, Integer.toString(Math.max(1, value)).length());
     }
@@ -744,63 +807,95 @@ public class PrettifyHttpPanelView
      * Per-code-point rendered widths for the wrap. Characters the font does not have a monospaced
      * glyph for (binary bodies, control pictures, CJK fallback, ...) are wider than {@code 'M'}, so
      * wrapping by character count would overflow the viewport; the splitter wraps by these measured
-     * widths instead. Cached for the current font, because a resize asks for the same widths again.
+     * widths instead. The table is shared by every view using the same font and filled lazily, so a
+     * view that never shows a wide character does not pay for a large table.
      */
     private DisplayTextSplitter.CharWidths charWidths() {
-        final Font font = textArea.getFont();
-        if (font != null && font == charWidthsFont && charWidths != null) {
-            return charWidths;
+        Font font = textArea.getFont();
+        if (font == null) {
+            return null;
         }
-        // RSTA paints with fractional font metrics enabled (see PrettifyTextArea), so the advance
-        // per character is the fractional one, which can differ from the rounded FontMetrics
-        // charWidth() by a noticeable fraction. Measure with the same fractional context the
-        // painter uses, otherwise a row is broken a few characters before the right edge.
-        final FontMetrics metrics = textArea.getFontMetrics(font);
-        final FontRenderContext frc = new FontRenderContext(null, true, true);
-        final double monospaceAdvance = monospaceAdvance(font, frc, metrics);
-        // A tab advances to the next tab stop, i.e. at most TAB_SIZE columns; upper-bound it so a
-        // tab can never make a row overflow.
-        final double tabWidth =
-                (monospaceAdvance > 0 ? monospaceAdvance : metrics.charWidth(' '))
-                        * PrettifyTextArea.TAB_SIZE;
-        DisplayTextSplitter.CharWidths measured =
-                new DisplayTextSplitter.CharWidths() {
-                    private final double[] cache = new double[0x10000];
-                    private final java.util.HashMap<Integer, Double> wide =
-                            new java.util.HashMap<>();
+        synchronized (CHAR_WIDTHS) {
+            FontCharWidths cached = CHAR_WIDTHS.get(font);
+            if (cached != null) {
+                return cached;
+            }
+            // RSTA paints with fractional font metrics enabled (see PrettifyTextArea), so the
+            // advance per character is the fractional one, which can differ from the rounded
+            // FontMetrics charWidth() by a noticeable fraction. Measure with the same fractional
+            // context the painter uses, otherwise a row is broken a few characters before the
+            // right edge.
+            FontMetrics metrics = textArea.getFontMetrics(font);
+            FontRenderContext frc = new FontRenderContext(null, true, true);
+            double monospaceAdvance = monospaceAdvance(font, frc, metrics);
+            // A tab advances to the next tab stop, i.e. at most TAB_SIZE columns; upper-bound it so
+            // a tab can never make a row overflow.
+            double tabWidth =
+                    (monospaceAdvance > 0 ? monospaceAdvance : metrics.charWidth(' '))
+                            * PrettifyTextArea.TAB_SIZE;
+            FontCharWidths measured =
+                    new FontCharWidths(font, frc, metrics, monospaceAdvance, tabWidth);
+            CHAR_WIDTHS.put(font, measured);
+            return measured;
+        }
+    }
 
-                    @Override
-                    public double widthOf(int codePoint) {
-                        if (codePoint == '\t') {
-                            return tabWidth;
-                        }
-                        if (codePoint >= 0 && codePoint < 0x10000) {
-                            double w = cache[codePoint];
-                            if (w <= 0) {
-                                w =
-                                        measuredWidth(
-                                                codePoint,
-                                                font,
-                                                frc,
-                                                metrics,
-                                                monospaceAdvance);
-                                cache[codePoint] = w;
-                            }
-                            return w;
-                        }
-                        Double w = wide.get(codePoint);
-                        if (w == null) {
-                            w =
-                                    measuredWidth(
-                                            codePoint, font, frc, metrics, monospaceAdvance);
-                            wide.put(codePoint, w);
-                        }
-                        return w;
-                    }
-                };
-        charWidthsFont = font;
-        charWidths = measured;
-        return measured;
+    /** The measured widths of one font, with lazily-grown tables. */
+    private static final class FontCharWidths implements DisplayTextSplitter.CharWidths {
+
+        private final Font font;
+        private final FontRenderContext frc;
+        private final FontMetrics metrics;
+        private final double monospaceAdvance;
+        private final double tabWidth;
+
+        /** Widths for code points below {@link #cacheLimit}; grown only as wide characters appear. */
+        private double[] cache = new double[0x100];
+
+        private int cacheLimit = 0x100;
+
+        /** Widths for supplementary code points (and any code point above {@link #cacheLimit}). */
+        private final Map<Integer, Double> wide = new HashMap<>();
+
+        FontCharWidths(
+                Font font,
+                FontRenderContext frc,
+                FontMetrics metrics,
+                double monospaceAdvance,
+                double tabWidth) {
+            this.font = font;
+            this.frc = frc;
+            this.metrics = metrics;
+            this.monospaceAdvance = monospaceAdvance;
+            this.tabWidth = tabWidth;
+        }
+
+        @Override
+        public synchronized double widthOf(int codePoint) {
+            if (codePoint == '\t') {
+                return tabWidth;
+            }
+            if (codePoint >= 0 && codePoint < cacheLimit) {
+                double w = cache[codePoint];
+                if (w <= 0) {
+                    w = measuredWidth(codePoint, font, frc, metrics, monospaceAdvance);
+                    cache[codePoint] = w;
+                }
+                return w;
+            }
+            Double w = wide.get(codePoint);
+            if (w == null) {
+                w = measuredWidth(codePoint, font, frc, metrics, monospaceAdvance);
+                wide.put(codePoint, w);
+                // Small BMP code points are cheaper in the array; grow it only when one appears.
+                if (codePoint >= cacheLimit && codePoint < 0x10000 && codePoint < cacheLimit * 8) {
+                    int grown = Math.min(0x10000, Math.max(codePoint + 1, cacheLimit * 2));
+                    cache = Arrays.copyOf(cache, grown);
+                    cacheLimit = grown;
+                }
+            }
+            return w;
+        }
     }
 
     /**
@@ -1285,31 +1380,32 @@ public class PrettifyHttpPanelView
         if (raw == null) {
             raw = display;
         }
-        if (!TextAlignment.sameNonWhitespace(display, raw)) {
+        TextAlignment.Mapper mapper = TextAlignment.mapper(display, raw);
+        if (mapper == null) {
             // The view is showing something that does not align with the raw message (for example
             // while a new document is being prepared); report the matches as they are.
             reportUnmappedMatches(pattern, display, matches);
             return;
         }
+        boolean combined = target == Target.REQUEST_ALL || target == Target.RESPONSE_ALL;
+        // The separator is the same for every match, so find it once instead of once per match.
+        int bodyStart = combined ? bodyStartInLf(raw) : 0;
         Matcher matcher = pattern.matcher(display);
         while (matcher.find()) {
-            int start = TextAlignment.displayToRaw(display, raw, matcher.start());
-            int end = TextAlignment.displayToRawEnd(display, raw, matcher.end());
+            int start = mapper.displayToRaw(matcher.start());
+            int end = mapper.displayToRawEnd(matcher.end());
             if (start < 0 || end < 0 || start >= end) {
                 continue;
             }
-            SearchMatch.Location location = locationFor(raw, start);
+            SearchMatch.Location location = locationFor(start, bodyStart);
             if (location == null) {
                 continue;
             }
-            boolean combined =
-                    target == Target.REQUEST_ALL || target == Target.RESPONSE_ALL;
             if (isHeaderLocation(location)) {
-                int headerEnd = combined ? bodyStartInLf(raw) : raw.length();
+                int headerEnd = combined ? bodyStart : raw.length();
                 int clampedEnd = Math.min(end, headerEnd);
                 matches.add(new SearchMatch(location, start, clampedEnd));
             } else {
-                int bodyStart = combined ? bodyStartInLf(raw) : 0;
                 matches.add(
                         new SearchMatch(location, start - bodyStart, end - bodyStart));
             }
@@ -1365,8 +1461,12 @@ public class PrettifyHttpPanelView
             default:
                 return;
         }
-        int displayStart = TextAlignment.rawToDisplay(raw, display, sourceStart);
-        int displayEnd = TextAlignment.rawToDisplayEnd(raw, display, sourceEnd);
+        TextAlignment.Mapper mapper = TextAlignment.mapper(display, raw);
+        if (mapper == null) {
+            return;
+        }
+        int displayStart = mapper.rawToDisplay(sourceStart);
+        int displayEnd = mapper.rawToDisplayEnd(sourceEnd);
         if (displayStart < 0 || displayEnd < 0 || displayStart >= displayEnd) {
             return;
         }
@@ -1378,7 +1478,7 @@ public class PrettifyHttpPanelView
     }
 
     /** The location of a match that starts at {@code lfOffset} in the raw LF text. */
-    private SearchMatch.Location locationFor(String raw, int lfOffset) {
+    private SearchMatch.Location locationFor(int lfOffset, int bodyStart) {
         switch (target) {
             case REQUEST_HEAD:
                 return SearchMatch.Location.REQUEST_HEAD;
@@ -1389,11 +1489,11 @@ public class PrettifyHttpPanelView
             case RESPONSE_BODY:
                 return SearchMatch.Location.RESPONSE_BODY;
             case REQUEST_ALL:
-                return lfOffset < bodyStartInLf(raw)
+                return lfOffset < bodyStart
                         ? SearchMatch.Location.REQUEST_HEAD
                         : SearchMatch.Location.REQUEST_BODY;
             case RESPONSE_ALL:
-                return lfOffset < bodyStartInLf(raw)
+                return lfOffset < bodyStart
                         ? SearchMatch.Location.RESPONSE_HEAD
                         : SearchMatch.Location.RESPONSE_BODY;
             default:

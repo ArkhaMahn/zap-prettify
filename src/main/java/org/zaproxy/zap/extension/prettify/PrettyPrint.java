@@ -19,6 +19,13 @@ public final class PrettyPrint {
     /** The standard indentation is two spaces per level. */
     private static final String INDENT = "  ";
 
+    /**
+     * How deeply nested markup is indented before the rest is emitted flat. The tree is built
+     * iteratively, but rendering is recursive, so this bounds both visual noise and stack use on a
+     * pathological document.
+     */
+    private static final int MAX_RENDER_DEPTH = 200;
+
     private static final Set<String> HTML_VOID =
             Set.of(
                     "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta",
@@ -52,7 +59,7 @@ public final class PrettyPrint {
                 default:
                     return body;
             }
-        } catch (RuntimeException e) {
+        } catch (RuntimeException | StackOverflowError e) {
             return body;
         }
     }
@@ -620,7 +627,7 @@ public final class PrettyPrint {
         List<Piece> pieces = tokenizeMarkup(s);
         List<Object> tree = buildTree(pieces, html);
         StringBuilder out = new StringBuilder(s.length() + 64);
-        render(tree, 0, s, html, out);
+        render(tree, 0, 0, s, html, out);
         return out.toString();
     }
 
@@ -829,7 +836,12 @@ public final class PrettyPrint {
     }
 
     private static void render(
-            List<Object> nodes, int indent, String src, boolean html, StringBuilder out) {
+            List<Object> nodes,
+            int indent,
+            int depth,
+            String src,
+            boolean html,
+            StringBuilder out) {
         for (Object node : nodes) {
             if (node instanceof Piece) {
                 Piece p = (Piece) node;
@@ -849,18 +861,25 @@ public final class PrettyPrint {
                 continue;
             }
             Element e = (Element) node;
+            if (depth >= MAX_RENDER_DEPTH) {
+                // Do not recurse further: emit the remaining subtree as one flat line.
+                line(out, indent);
+                out.append(collapseWs(src.substring(e.open.start, elementEnd(e))));
+                out.append('\n');
+                continue;
+            }
             String tag = e.open.tag == null ? "" : e.open.tag.toLowerCase(Locale.ROOT);
             if (isRawText(tag)) {
                 renderRaw(e, tag, indent, src, out);
             } else if (isInline(e, src)) {
                 line(out, indent);
-                out.append(collapseWs(src.substring(e.open.start, e.close.end).trim()));
+                out.append(collapseWs(src.substring(e.open.start, elementEnd(e)).trim()));
                 out.append('\n');
             } else {
                 line(out, indent);
                 out.append(collapseWs(src.substring(e.open.start, e.open.end)));
                 out.append('\n');
-                render(e.children, indent + 1, src, html, out);
+                render(e.children, indent + 1, depth + 1, src, html, out);
                 if (e.close != null) {
                     line(out, indent);
                     out.append(collapseWs(src.substring(e.close.start, e.close.end)));
@@ -868,6 +887,37 @@ public final class PrettyPrint {
                 }
             }
         }
+    }
+
+    /** Offset just past an element's close tag, or past its whole subtree when the close is missing. */
+    private static int elementEnd(Element e) {
+        if (e.close != null) {
+            return e.close.end;
+        }
+        int end = e.open.end;
+        Deque<Object> stack = new ArrayDeque<>(e.children);
+        while (!stack.isEmpty()) {
+            Object node = stack.pop();
+            if (node instanceof Piece) {
+                Piece p = (Piece) node;
+                if (p.end > end) {
+                    end = p.end;
+                }
+                continue;
+            }
+            Element child = (Element) node;
+            if (child.close != null) {
+                if (child.close.end > end) {
+                    end = child.close.end;
+                }
+            } else {
+                if (child.open.end > end) {
+                    end = child.open.end;
+                }
+                stack.addAll(child.children);
+            }
+        }
+        return end;
     }
 
     /**
@@ -888,7 +938,7 @@ public final class PrettyPrint {
         }
         if (tag.equals("pre") || tag.equals("textarea")) {
             line(out, indent);
-            out.append(src, e.open.start, e.close == null ? e.open.end : e.close.end);
+            out.append(src, e.open.start, elementEnd(e));
             out.append('\n');
             return;
         }

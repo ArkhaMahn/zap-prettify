@@ -50,15 +50,14 @@ final class PrettifyTextActions {
     }
 
     static synchronized void remove() {
-        if (!initialized || View.getSingleton() == null) {
-            return;
-        }
-        Vector<JMenuItem> popupList = View.getSingleton().getPopupList();
+        View view = View.getSingleton();
+        Vector<JMenuItem> popupList = view == null ? null : view.getPopupList();
         if (popupList != null) {
             for (JMenuItem item : REGISTERED) {
                 popupList.remove(item);
             }
         }
+        // Reset even without a view: the next hook (or a test) must be able to register again.
         REGISTERED.clear();
         initialized = false;
     }

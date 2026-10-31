@@ -41,6 +41,162 @@ public final class TextAlignment {
     }
 
     /**
+     * Creates a validated, monotonic offset mapper for one display/raw pair.
+     *
+     * <p>The plain static mapping methods validate the pair on every call and rescan from the start
+     * of the text, which is fine for a single lookup but quadratic when a search reports thousands
+     * of matches. A mapper validates once and keeps a forward cursor, so ascending calls are
+     * linear overall. A call that moves backwards resets its cursor, so the mapper also works for
+     * the occasional out-of-order highlight.
+     *
+     * @return the mapper, or {@code null} when the texts are not whitespace-equivalent
+     */
+    public static Mapper mapper(String display, String raw) {
+        if (display == null || raw == null || !sameNonWhitespace(display, raw)) {
+            return null;
+        }
+        return new Mapper(display, raw);
+    }
+
+    /** A validated display/raw offset mapper with forward cursors (see {@link #mapper}). */
+    public static final class Mapper {
+
+        private final String display;
+        private final String raw;
+
+        private int displayPos;
+        private int displayCount;
+        private int rawPos;
+        private int rawCount;
+
+        private int rawScanPos;
+        private int rawScanCount;
+        private int displayScanPos;
+        private int displayScanCount;
+
+        private Mapper(String display, String raw) {
+            this.display = display;
+            this.raw = raw;
+        }
+
+        /** Maps an offset in the displayed text to the raw text. */
+        public int displayToRaw(int offset) {
+            int at = clamp(offset, 0, display.length());
+            int count = countDisplayTo(at);
+            if (at < display.length() && !isWhitespace(display.charAt(at))) {
+                return rawIndexOf(count + 1);
+            }
+            return rawAfter(count);
+        }
+
+        /** Maps just past a range in the displayed text to just past the matching raw range. */
+        public int displayToRawEnd(int offset) {
+            return rawAfter(countDisplayTo(clamp(offset, 0, display.length())));
+        }
+
+        /** Maps an offset in the raw text to the displayed text. */
+        public int rawToDisplay(int offset) {
+            int at = clamp(offset, 0, raw.length());
+            int count = countRawTo(at);
+            if (at < raw.length() && !isWhitespace(raw.charAt(at))) {
+                return displayIndexOf(count + 1);
+            }
+            return displayAfter(count);
+        }
+
+        /** Maps just past a range in the raw text to just past the matching displayed range. */
+        public int rawToDisplayEnd(int offset) {
+            return displayAfter(countRawTo(clamp(offset, 0, raw.length())));
+        }
+
+        /** Number of non-whitespace characters in {@code display[0, at)}. */
+        private int countDisplayTo(int at) {
+            if (at < displayPos) {
+                displayPos = 0;
+                displayCount = 0;
+            }
+            while (displayPos < at) {
+                if (!isWhitespace(display.charAt(displayPos))) {
+                    displayCount++;
+                }
+                displayPos++;
+            }
+            return displayCount;
+        }
+
+        /** Number of non-whitespace characters in {@code raw[0, at)}. */
+        private int countRawTo(int at) {
+            if (at < rawScanPos) {
+                rawScanPos = 0;
+                rawScanCount = 0;
+            }
+            while (rawScanPos < at) {
+                if (!isWhitespace(raw.charAt(rawScanPos))) {
+                    rawScanCount++;
+                }
+                rawScanPos++;
+            }
+            return rawScanCount;
+        }
+
+        /**
+         * Offset of the {@code oneBased}th non-whitespace character of the raw text, or its length
+         * when there are fewer.
+         */
+        private int rawIndexOf(int oneBased) {
+            advanceRawTo(oneBased);
+            return rawCount < oneBased ? raw.length() : rawPos - 1;
+        }
+
+        /** Offset just after the first {@code count} non-whitespace characters of the raw text. */
+        private int rawAfter(int count) {
+            advanceRawTo(count);
+            return rawPos;
+        }
+
+        private void advanceRawTo(int count) {
+            if (count < rawCount) {
+                rawPos = 0;
+                rawCount = 0;
+            }
+            while (rawCount < count && rawPos < raw.length()) {
+                if (!isWhitespace(raw.charAt(rawPos))) {
+                    rawCount++;
+                }
+                rawPos++;
+            }
+        }
+
+        /**
+         * Offset of the {@code oneBased}th non-whitespace character of the displayed text, or its
+         * length when there are fewer.
+         */
+        private int displayIndexOf(int oneBased) {
+            advanceDisplayTo(oneBased);
+            return displayScanCount < oneBased ? display.length() : displayScanPos - 1;
+        }
+
+        /** Offset just after the first {@code count} non-whitespace characters of the display. */
+        private int displayAfter(int count) {
+            advanceDisplayTo(count);
+            return displayScanPos;
+        }
+
+        private void advanceDisplayTo(int count) {
+            if (count < displayScanCount) {
+                displayScanPos = 0;
+                displayScanCount = 0;
+            }
+            while (displayScanCount < count && displayScanPos < display.length()) {
+                if (!isWhitespace(display.charAt(displayScanPos))) {
+                    displayScanCount++;
+                }
+                displayScanPos++;
+            }
+        }
+    }
+
+    /**
      * Maps an offset in the displayed (formatted) text to the corresponding offset in the raw text.
      * Returns -1 when the two texts are not whitespace-equivalent.
      */
