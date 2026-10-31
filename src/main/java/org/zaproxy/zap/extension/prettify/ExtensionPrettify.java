@@ -148,9 +148,10 @@ public class ExtensionPrettify extends ExtensionAdaptor {
         // flight), so their cleanup must not depend on getView().
         PrettifyTextActions.remove();
         PrettifyExecutor.shutdown();
-        // Clear the cache after stopping the workers so a finishing split cannot immediately
-        // repopulate it.
+        // Clear the caches after stopping the workers so a finishing split cannot immediately
+        // repopulate them.
         DisplayTextSplitter.clearCache();
+        PrettifyHttpPanelView.clearFontWidths();
     }
 
     /** Runs one removal, logging and continuing on failure so unload cannot stop half-way. */

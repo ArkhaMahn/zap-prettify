@@ -9,7 +9,6 @@ import java.awt.event.ComponentAdapter;
 import java.awt.event.ComponentEvent;
 import java.awt.font.FontRenderContext;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -173,6 +172,13 @@ public class PrettifyHttpPanelView
      * in a small access-ordered cache instead of allocating one table per view.
      */
     private static final int CHAR_WIDTH_CACHE_SIZE = 8;
+
+    /**
+     * How many measured widths a single font keeps for code points outside its array table.
+     * Supplemental characters are rare in a message, so a small least-recently-used window keeps
+     * the shared cache bounded without paying for a table for every possible code point.
+     */
+    private static final int MAX_WIDE_WIDTHS = 4096;
 
     private static final Map<Font, FontCharWidths> CHAR_WIDTHS =
             new LinkedHashMap<Font, FontCharWidths>(4, 0.75f, true) {
@@ -804,6 +810,16 @@ public class PrettifyHttpPanelView
     }
 
     /**
+     * Drops the shared font-width cache. Called from the add-on's unload so the measured tables
+     * (which can hold a full BMP-width array per font) are not retained after the add-on is gone.
+     */
+    static void clearFontWidths() {
+        synchronized (CHAR_WIDTHS) {
+            CHAR_WIDTHS.clear();
+        }
+    }
+
+    /**
      * Per-code-point rendered widths for the wrap. Characters the font does not have a monospaced
      * glyph for (binary bodies, control pictures, CJK fallback, ...) are wider than {@code 'M'}, so
      * wrapping by character count would overflow the viewport; the splitter wraps by these measured
@@ -854,8 +870,20 @@ public class PrettifyHttpPanelView
 
         private int cacheLimit = 0x100;
 
-        /** Widths for supplementary code points (and any code point above {@link #cacheLimit}). */
-        private final Map<Integer, Double> wide = new HashMap<>();
+        /**
+         * Widths for supplementary code points (and any code point above {@link #cacheLimit}).
+         * Bounded by an access-ordered window so a message with many distinct wide characters
+         * cannot grow the shared cache without limit.
+         */
+        private final Map<Integer, Double> wide =
+                new LinkedHashMap<Integer, Double>(16, 0.75f, true) {
+                    private static final long serialVersionUID = 1L;
+
+                    @Override
+                    protected boolean removeEldestEntry(Map.Entry<Integer, Double> eldest) {
+                        return size() > MAX_WIDE_WIDTHS;
+                    }
+                };
 
         FontCharWidths(
                 Font font,

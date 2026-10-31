@@ -97,6 +97,22 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
         return state <= BODY_DETECT ? state : S_HDR_START;
     }
 
+    /**
+     * Drops the cached header and body-delegate state. Called when the header block was edited in
+     * the text area: the resolved {@code Content-Type} (and therefore the body token maker) may no
+     * longer match the text, so the next tokenization re-reads the headers from the top of the
+     * message instead of reusing what was resolved before the edit.
+     */
+    void resetForEdit() {
+        hdrName.setLength(0);
+        contentTypeValue.setLength(0);
+        contentTypeHeader = false;
+        bodyContentType = null;
+        bodyTokenMaker = null;
+        bodyStyleKey = null;
+        bodyResolved = false;
+    }
+
     @Override
     public TokenMap getWordsToHighlight() {
         return null;
