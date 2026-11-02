@@ -84,39 +84,12 @@ public final class PrettyPrint {
         return formatted;
     }
 
-    /** Formats the body of a full message (status/request line + headers + body). */
-    public static String formatMessage(String bodyStyleKey, String message) {
-        return formatMessage(bodyStyleKey, message, true);
-    }
-
-    /**
-     * Formats the body of a full message, optionally leaving the body as it is.
-     */
-    public static String formatMessage(String bodyStyleKey, String message, boolean reformat) {
-        if (message == null || bodyStyleKey == null) {
-            return message;
-        }
-        int split = bodyOffset(message);
-        if (split < 0 || split >= message.length()) {
-            // No body: drop the blank line ZAP keeps after the header block so the headers are not
-            // followed by dangling empty lines.
-            return stripTrailingNewlines(message);
-        }
-        String body = message.substring(split);
-        return message.substring(0, split) + (reformat ? formatBody(bodyStyleKey, body) : body);
-    }
-
     /**
      * Formats the body of a full message, resolving the body style from {@code contentType} and,
      * when the content type is not decisive, from the body itself. This lets bodies served with a
      * custom content type (or with {@code text/plain}) still be pretty-printed as JSON, markup or
-     * JavaScript.
+     * JavaScript. Optionally leaves the body as it is.
      */
-    public static String formatMessageFor(String contentType, String message) {
-        return formatMessageFor(contentType, message, true);
-    }
-
-    /** Formats a full message, optionally leaving the body as it is (see {@link #formatMessage}). */
     public static String formatMessageFor(String contentType, String message, boolean reformat) {
         if (message == null) {
             return null;
@@ -258,9 +231,9 @@ public final class PrettyPrint {
         while (i < n) {
             char c = s.charAt(i);
 
-            if (lex.opaque[i]) {
+            if (lex.isOpaque(i)) {
                 int j = i;
-                while (j < n && lex.opaque[j]) {
+                while (j < n && lex.isOpaque(j)) {
                     j++;
                 }
                 spaceBefore(out, pendingSpace, atLineStart, last);
@@ -268,7 +241,7 @@ public final class PrettyPrint {
                 atLineStart = false;
                 pendingSpace = false;
                 last = s.charAt(j - 1);
-                if (lex.lineComment[i]) {
+                if (lex.isLineComment(i)) {
                     line(out, indent);
                     atLineStart = true;
                 }

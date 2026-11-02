@@ -14,26 +14,31 @@ import org.fife.ui.rsyntaxtextarea.TokenTypes;
  * brackets, semicolons, commas) correctly without ad-hoc string/regular-expression heuristics: any
  * character inside a string, template literal, regular expression, comment or markup attribute
  * value is marked "opaque" and copied verbatim.
+ *
+ * <p>The classification is one byte per character (a bit for "opaque", a bit for "line comment"),
+ * so even a very large body costs one byte per character instead of the four byte/character arrays
+ * an earlier implementation allocated.
  */
 final class Lexer {
 
-    /** String / character / template / regular-expression literals and markup attribute values. */
-    final boolean[] literal;
+    private static final int OPAQUE_FLAG = 1;
+    private static final int LINE_COMMENT_FLAG = 2;
 
-    /** {@link #literal} spans plus comments and CDATA / DTD / processing-instruction blocks. */
-    final boolean[] opaque;
-
-    /** Single-line comments (so the formatter can force a line break after them). */
-    final boolean[] lineComment;
-
-    /** Markup tag delimiters such as {@code <}, {@code </} and {@code >}. */
-    final boolean[] tagDelim;
+    /** One byte per character, with {@link #OPAQUE_FLAG} and {@link #LINE_COMMENT_FLAG} bits. */
+    private final byte[] flags;
 
     private Lexer(int length) {
-        literal = new boolean[length];
-        opaque = new boolean[length];
-        lineComment = new boolean[length];
-        tagDelim = new boolean[length];
+        flags = new byte[length];
+    }
+
+    /** Whether {@code i} is inside a string, regex, template literal, comment or attribute value. */
+    boolean isOpaque(int i) {
+        return i < 0 || i >= flags.length || (flags[i] & OPAQUE_FLAG) != 0;
+    }
+
+    /** Whether {@code i} is inside a single-line comment. */
+    boolean isLineComment(int i) {
+        return i >= 0 && i < flags.length && (flags[i] & LINE_COMMENT_FLAG) != 0;
     }
 
     /**
@@ -127,8 +132,7 @@ final class Lexer {
                                     // Unclosed literal: mark the rest directly instead of letting
                                     // the token maker read it as code and grow its token list
                                     // quadratically.
-                                    mark(lex.literal, pos, from, len);
-                                    mark(lex.opaque, pos, from, len);
+                                    lex.mark(pos, from, len, OPAQUE_FLAG);
                                     state = 0;
                                     inState = 0;
                                     chunkFrom = len;
@@ -138,16 +142,11 @@ final class Lexer {
                             }
                             lastPaintableType = type;
                             lastPaintableEnd = to;
-                            if (isLiteral(type)) {
-                                mark(lex.literal, pos, from, to);
-                                mark(lex.opaque, pos, from, to);
-                            } else if (isComment(type)) {
-                                mark(lex.opaque, pos, from, to);
+                            if (isLiteral(type) || isComment(type)) {
+                                lex.mark(pos, from, to, OPAQUE_FLAG);
                                 if (type == TokenTypes.COMMENT_EOL) {
-                                    mark(lex.lineComment, pos, from, to);
+                                    lex.mark(pos, from, to, LINE_COMMENT_FLAG);
                                 }
-                            } else if (type == TokenTypes.MARKUP_TAG_DELIMITER) {
-                                mark(lex.tagDelim, pos, from, to);
                             }
                             if (x.isPaintable() && !x.isComment() && !x.isWhitespace()) {
                                 lastSignificant = x;
@@ -166,8 +165,7 @@ final class Lexer {
                             // A line comment runs to the end of the logical line. The token maker
                             // sees the end of the chunk as the end of the line, so mark the rest
                             // directly instead of relying on a carried state.
-                            mark(lex.opaque, pos, chunkTo, len);
-                            mark(lex.lineComment, pos, chunkTo, len);
+                            lex.mark(pos, chunkTo, len, OPAQUE_FLAG | LINE_COMMENT_FLAG);
                             state = 0;
                             inState = 0;
                             chunkFrom = len;
@@ -196,17 +194,18 @@ final class Lexer {
         return lex;
     }
 
-    private static void mark(boolean[] mask, int base, int from, int to) {
+    /** Sets {@code flag} on all characters in {@code [base + from, base + to)}. */
+    private void mark(int base, int from, int to, int flag) {
         int lo = base + from;
         int hi = base + to;
         if (lo < 0) {
             lo = 0;
         }
-        if (hi > mask.length) {
-            hi = mask.length;
+        if (hi > flags.length) {
+            hi = flags.length;
         }
         for (int i = lo; i < hi; i++) {
-            mask[i] = true;
+            flags[i] |= flag;
         }
     }
 

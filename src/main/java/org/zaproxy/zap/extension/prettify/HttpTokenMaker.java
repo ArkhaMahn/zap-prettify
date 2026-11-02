@@ -83,6 +83,13 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
     private boolean bodyResolved;
     private String bodyStyleKey;
 
+    /**
+     * The content type changed since the body delegate was resolved, so a decisive new type
+     * supersedes it. Set by {@link #finalizeContentType()}, consumed by
+     * {@link #getBodyTokenMaker(Segment)}.
+     */
+    private boolean bodyContentTypeStale;
+
     protected HttpTokenMaker(boolean response, boolean headersOnly) {
         this.response = response;
         this.headersOnly = headersOnly;
@@ -95,22 +102,6 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
      */
     static int resetAfterLine(int state) {
         return state <= BODY_DETECT ? state : S_HDR_START;
-    }
-
-    /**
-     * Drops the cached header and body-delegate state. Called when the header block was edited in
-     * the text area: the resolved {@code Content-Type} (and therefore the body token maker) may no
-     * longer match the text, so the next tokenization re-reads the headers from the top of the
-     * message instead of reusing what was resolved before the edit.
-     */
-    void resetForEdit() {
-        hdrName.setLength(0);
-        contentTypeValue.setLength(0);
-        contentTypeHeader = false;
-        bodyContentType = null;
-        bodyTokenMaker = null;
-        bodyStyleKey = null;
-        bodyResolved = false;
     }
 
     @Override
@@ -366,6 +357,7 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
     private void finalizeContentType() {
         if (contentTypeHeader) {
             bodyContentType = contentTypeValue.toString().trim();
+            bodyContentTypeStale = true;
         }
     }
 
@@ -424,8 +416,8 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
     // -- Body ---------------------------------------------------------------------------------
 
     private Token tokenizeBody(Segment text, int delegateState, int startOffset) {
-        TokenMaker dm = getBodyTokenMaker(text);
-        if (dm == null) {
+        boolean reResolved = resolveBodyDelegate(text);
+        if (bodyTokenMaker == null) {
             if (text.count > 0) {
                 addToken(
                         text.array,
@@ -438,7 +430,10 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
             return firstToken;
         }
 
-        Token list = dm.getTokenList(text, delegateState, startOffset);
+        // A delegate re-resolved on this line must start fresh: the carried state belongs to the
+        // delegate it was produced by, and a different kind cannot pick it up.
+        int state = reResolved ? 0 : delegateState;
+        Token list = bodyTokenMaker.getTokenList(text, state, startOffset);
         Token t = list;
         while (t != null) {
             int len = t.length();
@@ -452,33 +447,41 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
         // signalled through the state (the ContinuedStringTokenMaker marker), not the token list.
         // The wrapped delegate records the state while it builds the list; asking it again would
         // tokenize the whole body line a second time.
-        int state =
-                dm instanceof ContinuedStringTokenMaker
-                        ? ((ContinuedStringTokenMaker) dm).lastState()
-                        : dm.getLastTokenTypeOnLine(text, delegateState);
-        endLine(BODY_BASE - state);
+        int last =
+                bodyTokenMaker instanceof ContinuedStringTokenMaker
+                        ? ((ContinuedStringTokenMaker) bodyTokenMaker).lastState()
+                        : bodyTokenMaker.getLastTokenTypeOnLine(text, state);
+        endLine(BODY_BASE - last);
         return firstToken;
     }
 
-    private TokenMaker getBodyTokenMaker(Segment firstLine) {
+    /**
+     * The token maker for the body, resolved when the first body line asks for it and re-resolved
+     * when a content type header read later makes the body's type decisive, so that a body typed
+     * before its {@code Content-Type:} header is keyworded once the header names a styled type.
+     *
+     * <p>A type the header leaves undetermined keeps what the initial resolution decided: the
+     * sniff reads the leading text of the whole body, and re-sniffing line by line would only
+     * colour a sniffed body worse.
+     *
+     * @return whether the delegate was swapped on this line
+     */
+    private boolean resolveBodyDelegate(Segment firstLine) {
         if (!bodyResolved) {
             bodyResolved = true;
-            String styleKey = ContentType.styleKeyFor(bodyContentType, prefixOf(firstLine));
-            bodyStyleKey = styleKey;
-            if (styleKey == null || ContentType.PLAIN_STYLE.equals(styleKey)) {
-                bodyTokenMaker = null;
-            } else if (ContentType.FORM_STYLE.equals(styleKey)) {
-                bodyTokenMaker = new FormUrlEncodedTokenMaker();
-            } else {
-                // Wrap the delegate so a string that a wrap break cuts in half stays a string on the
-                // continuation rows, exactly as it does for a body-only view whose document token
-                // maker is itself wrapped.
-                bodyTokenMaker =
-                        new ContinuedStringTokenMaker(
-                                PrettifyTokenMakerFactory.bodyTokenMaker(styleKey));
+            bodyContentTypeStale = false;
+            resetBodyDelegate(ContentType.styleKeyFor(bodyContentType, prefixOf(firstLine)));
+            // A body always starts fresh, so the caller keeps the carried state as it is.
+            return false;
+        }
+        if (bodyContentTypeStale) {
+            bodyContentTypeStale = false;
+            String typeKey = ContentType.styleKeyFor(bodyContentType);
+            if (!ContentType.PLAIN_STYLE.equals(typeKey) && !typeKey.equals(bodyStyleKey)) {
+                return resetBodyDelegate(typeKey);
             }
         }
-        return bodyTokenMaker;
+        return false;
     }
 
     /**
@@ -493,6 +496,28 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
     /** Whether the resolved body delegate is a script token maker (JavaScript or TypeScript). */
     boolean bodyIsScript() {
         return ContentType.isScriptStyle(bodyStyleKey);
+    }
+
+    /**
+     * Builds the delegate a resolved style key asks for and records the key. A plain (or
+     * undetermined) body has no delegate: whole-line tokens of a tokenless body are painted as
+     * identifiers.
+     */
+    private boolean resetBodyDelegate(String styleKey) {
+        boolean changed = !java.util.Objects.equals(styleKey, bodyStyleKey);
+        bodyStyleKey = styleKey;
+        if (styleKey == null || ContentType.PLAIN_STYLE.equals(styleKey)) {
+            bodyTokenMaker = null;
+        } else if (ContentType.FORM_STYLE.equals(styleKey)) {
+            bodyTokenMaker = new FormUrlEncodedTokenMaker();
+        } else {
+            // Wrap the delegate so a string that a wrap break cuts in half stays a string on the
+            // continuation rows, exactly as it does for a body-only view whose document token
+            // maker is itself wrapped.
+            bodyTokenMaker = new ContinuedStringTokenMaker(
+                    PrettifyTokenMakerFactory.bodyTokenMaker(styleKey));
+        }
+        return changed;
     }
 
     /** The body's leading text, used to sniff a style when the content type is not decisive. */

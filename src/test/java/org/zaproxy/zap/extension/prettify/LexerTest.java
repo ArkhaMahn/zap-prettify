@@ -20,10 +20,10 @@ class LexerTest {
         assertNotNull(lex);
         int commentEnd = text.indexOf("*/");
         for (int i = 0; i < commentEnd; i++) {
-            assertTrue(lex.opaque[i], "comment at " + i);
+            assertTrue(lex.isOpaque(i), "comment at " + i);
         }
-        assertTrue(lex.opaque[commentEnd], "comment end");
-        assertFalse(lex.opaque[commentEnd + 2], "code after the comment");
+        assertTrue(lex.isOpaque(commentEnd), "comment end");
+        assertFalse(lex.isOpaque(commentEnd + 2), "code after the comment");
     }
 
     @Test
@@ -33,9 +33,9 @@ class LexerTest {
         assertNotNull(lex);
         int start = text.indexOf("// ") + 3;
         for (int i = start; i < start + 20_000; i++) {
-            assertTrue(lex.opaque[i], "comment at " + i);
+            assertTrue(lex.isOpaque(i), "comment at " + i);
         }
-        assertFalse(lex.opaque[text.indexOf("var b")], "code after the comment");
+        assertFalse(lex.isOpaque(text.indexOf("var b")), "code after the comment");
     }
 
     @Test
@@ -45,9 +45,9 @@ class LexerTest {
         assertNotNull(lex);
         int start = text.indexOf('"') + 1;
         for (int i = start; i < start + 20_000; i++) {
-            assertTrue(lex.opaque[i], "string at " + i);
+            assertTrue(lex.isOpaque(i), "string at " + i);
         }
-        assertFalse(lex.opaque[text.indexOf("var b")], "code after the string");
+        assertFalse(lex.isOpaque(text.indexOf("var b")), "code after the string");
     }
 
     @Test
@@ -59,7 +59,7 @@ class LexerTest {
         Lexer lex = Lexer.of("text/javascript", text);
         assertNotNull(lex);
         for (int i = slash + 1; i < slash + 4; i++) {
-            assertTrue(lex.opaque[i], "regex at " + i);
+            assertTrue(lex.isOpaque(i), "regex at " + i);
         }
     }
 
@@ -70,9 +70,9 @@ class LexerTest {
         Lexer lex = Lexer.of("text/javascript", text);
         assertNotNull(lex);
         for (int i = start; i < start + 20_000; i++) {
-            assertTrue(lex.opaque[i], "regex at " + i);
+            assertTrue(lex.isOpaque(i), "regex at " + i);
         }
-        assertFalse(lex.opaque[text.indexOf("var b")], "code after the regex");
+        assertFalse(lex.isOpaque(text.indexOf("var b")), "code after the regex");
     }
 
     @Test
@@ -85,9 +85,9 @@ class LexerTest {
         Lexer lex = Lexer.of("text/javascript", text);
         assertNotNull(lex);
         for (int i = start; i <= end; i++) {
-            assertTrue(lex.opaque[i], "regex at " + i);
+            assertTrue(lex.isOpaque(i), "regex at " + i);
         }
-        assertFalse(lex.opaque[text.indexOf("var b")], "code after the regex");
+        assertFalse(lex.isOpaque(text.indexOf("var b")), "code after the regex");
     }
 
     @Test
@@ -97,7 +97,7 @@ class LexerTest {
         Lexer lex = Lexer.of("text/javascript", text);
         assertNotNull(lex);
         for (int i = start; i < text.length(); i++) {
-            assertTrue(lex.opaque[i], "unclosed regex at " + i);
+            assertTrue(lex.isOpaque(i), "unclosed regex at " + i);
         }
     }
 
@@ -108,10 +108,10 @@ class LexerTest {
         Lexer lex = Lexer.of("text/javascript", text);
         assertNotNull(lex);
         for (int i = start; i < text.indexOf('\n'); i++) {
-            assertTrue(lex.opaque[i], "comment at " + i);
-            assertTrue(lex.lineComment[i], "line comment at " + i);
+            assertTrue(lex.isOpaque(i), "comment at " + i);
+            assertTrue(lex.isLineComment(i), "line comment at " + i);
         }
-        assertFalse(lex.opaque[text.indexOf("var b")], "code after the comment");
+        assertFalse(lex.isOpaque(text.indexOf("var b")), "code after the comment");
     }
 
     @Test
@@ -122,10 +122,10 @@ class LexerTest {
         Lexer lex = Lexer.of("text/javascript", text);
         assertNotNull(lex);
         for (int i = start; i < text.indexOf('\n'); i++) {
-            assertTrue(lex.opaque[i], "comment at " + i);
-            assertTrue(lex.lineComment[i], "line comment at " + i);
+            assertTrue(lex.isOpaque(i), "comment at " + i);
+            assertTrue(lex.isLineComment(i), "line comment at " + i);
         }
-        assertFalse(lex.opaque[text.indexOf("var b")], "code after the comment");
+        assertFalse(lex.isOpaque(text.indexOf("var b")), "code after the comment");
     }
 
     @Test
@@ -135,10 +135,10 @@ class LexerTest {
         Lexer lex = Lexer.of("text/javascript", text);
         assertNotNull(lex);
         for (int i = start; i < text.indexOf('\n'); i++) {
-            assertTrue(lex.opaque[i], "comment at " + i);
-            assertTrue(lex.lineComment[i], "line comment at " + i);
+            assertTrue(lex.isOpaque(i), "comment at " + i);
+            assertTrue(lex.isLineComment(i), "line comment at " + i);
         }
-        assertFalse(lex.opaque[text.indexOf("var b")], "code after the comment");
+        assertFalse(lex.isOpaque(text.indexOf("var b")), "code after the comment");
     }
 
     @Test
@@ -153,9 +153,9 @@ class LexerTest {
         Lexer lex = Lexer.of("text/javascript", text);
         assertNotNull(lex);
         for (int i = start; i <= end + 1; i++) {
-            assertTrue(lex.opaque[i], "comment at " + i);
+            assertTrue(lex.isOpaque(i), "comment at " + i);
         }
-        assertFalse(lex.opaque[text.indexOf("var b")], "code after the comment");
+        assertFalse(lex.isOpaque(text.indexOf("var b")), "code after the comment");
     }
 
     @Test
@@ -164,8 +164,8 @@ class LexerTest {
         int end = text.indexOf("*/");
         Lexer lex = Lexer.of("text/javascript", text);
         assertNotNull(lex);
-        assertTrue(lex.opaque[end + 1], "comment end");
-        assertFalse(lex.opaque[text.indexOf("var b")], "code after the comment");
+        assertTrue(lex.isOpaque(end + 1), "comment end");
+        assertFalse(lex.isOpaque(text.indexOf("var b")), "code after the comment");
     }
 
     @Test
@@ -174,7 +174,7 @@ class LexerTest {
         int slash = TokenizeChunks.SIZE;
         Lexer lex = Lexer.of("text/javascript", text);
         assertNotNull(lex);
-        assertFalse(lex.opaque[slash], "division at the boundary");
+        assertFalse(lex.isOpaque(slash), "division at the boundary");
     }
 
     @Test
@@ -183,7 +183,7 @@ class LexerTest {
         int slash = text.indexOf('/');
         Lexer lex = Lexer.of("text/javascript", text);
         assertNotNull(lex);
-        assertFalse(lex.opaque[slash], "division after the boundary");
+        assertFalse(lex.isOpaque(slash), "division after the boundary");
     }
 
     @Test
@@ -193,7 +193,7 @@ class LexerTest {
         Lexer lex = Lexer.of("text/javascript", text);
         assertNotNull(lex);
         for (int i = start; i < start + 3; i++) {
-            assertTrue(lex.opaque[i], "regex at " + i);
+            assertTrue(lex.isOpaque(i), "regex at " + i);
         }
     }
 }

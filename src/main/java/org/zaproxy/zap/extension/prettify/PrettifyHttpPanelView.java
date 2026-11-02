@@ -9,6 +9,7 @@ import java.awt.event.ComponentAdapter;
 import java.awt.event.ComponentEvent;
 import java.awt.font.FontRenderContext;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -36,6 +37,8 @@ import org.fife.ui.rtextarea.RTextScrollPane;
 import org.parosproxy.paros.Constant;
 import org.parosproxy.paros.network.HttpMessage;
 import org.parosproxy.paros.network.HttpRequestHeader;
+import org.apache.commons.httpclient.URI;
+import org.apache.commons.httpclient.URIException;
 import org.parosproxy.paros.view.View;
 import org.zaproxy.zap.extension.httppanel.Message;
 import org.zaproxy.zap.extension.httppanel.view.AbstractStringHttpPanelViewModel;
@@ -132,7 +135,11 @@ public class PrettifyHttpPanelView
     /** Line-number digits of the installed document, used to calibrate {@link #gutterFixedWidth}. */
     private int installedDigits = -1;
 
-    /** The message the installed document was built from, to tell a new message from a change. */
+    /**
+     * The message the installed document was built from, so a re-render of the same message can
+     * be told apart from ZAP swapping a different message into the panel. The undo history is
+     * bound to the message the session shows: a different message starts the edit session over.
+     */
     private Message shownMessage;
 
     /** Where the caret should be restored after a re-render, counted in non-whitespace characters. */
@@ -161,8 +168,46 @@ public class PrettifyHttpPanelView
      */
     private String lastShownBody = "";
 
+    /**
+     * The query string of the request URI the view last showed together with the body in
+     * {@link #lastShownBody}. The return trip of the method change is not body-only: when the
+     * method changes to POST, ZAP moves the whole query string into the body, taking the parameters
+     * the URL had before the body was merged into it with it. The query that was there before is
+     * remembered so that it can be put back with the body.
+     */
+    private String lastShownQuery = "";
+
+    /**
+     * The message the pair in {@link #lastShownBody} and {@link #lastShownQuery} was remembered
+     * from. The pair must not carry between messages: when another request is shown, what the
+     * previous request had is no longer this request's and is reset.
+     */
+    private Message lastShownMessage;
+
     /** The request method the view last showed, to notice a change of the verb. */
     private String lastShownMethod = "";
+
+    /**
+     * The document of the current edit session, and the body style {@code sessionStyle} it was
+     * built for. Keeping one document over the re-renders, and replacing only its content (exactly
+     * how the plain text views update their one document), is what keeps the undo history going
+     * for the body and the headers alike: RTextArea installs a fresh undo manager whenever a
+     * document is swapped in, so a rebuilt document throws the history away.
+     *
+     * <p>The history is the history of one message, like it is the history of one request in
+     * every tab of Repeater and the manual request editor. The session starts at the message:
+     * there is nothing to undo beyond it, so the walk of a Ctrl+Z stays between the user's
+     * edits and the rendered states of the message - an empty text area appears in no part of
+     * it. When ZAP swaps a different message into the panel, the session is started over for
+     * the new message: nothing an earlier request or its session had on record is reinserted in
+     * this editor.
+     *
+     * <p>A change of the body style (the content type a view without a fixed style is showing)
+     * rebuilds the document, and so starts the history over. Only editable views keep a session.
+     */
+    private RSyntaxDocument sessionDocument;
+
+    private String sessionStyle;
 
     private String configurationKey = "";
 
@@ -172,13 +217,6 @@ public class PrettifyHttpPanelView
      * in a small access-ordered cache instead of allocating one table per view.
      */
     private static final int CHAR_WIDTH_CACHE_SIZE = 8;
-
-    /**
-     * How many measured widths a single font keeps for code points outside its array table.
-     * Supplemental characters are rare in a message, so a small least-recently-used window keeps
-     * the shared cache bounded without paying for a table for every possible code point.
-     */
-    private static final int MAX_WIDE_WIDTHS = 4096;
 
     private static final Map<Font, FontCharWidths> CHAR_WIDTHS =
             new LinkedHashMap<Font, FontCharWidths>(4, 0.75f, true) {
@@ -365,11 +403,32 @@ public class PrettifyHttpPanelView
         if (gen != generation) {
             return;
         }
-        RSyntaxDocument document =
-                ChunkedTextLoader.buildDocument(
-                        split.displayText(), style, split, () -> gen != generation, editable);
-        if (document == null) {
-            return;
+        RSyntaxDocument document;
+        if (editable && sessionDocument != null && style.equals(sessionStyle)) {
+            // The edit session keeps its document: the re-render replaces its content in install
+            // instead of swapping a new one (and the undo history) in. The style has to be the
+            // session's because PrettifyDocument tokenizes it; a style change is an epoch that
+            // rebuilds the session. The identity of the document in the text area is re-checked
+            // on the EDT in install; the fields are read here across threads without a lock,
+            // which is safe because a decision taken on stale values builds a fresh document.
+            document = sessionDocument;
+        } else if (editable) {
+            // A session starts with the empty document: the message is filled in through the text
+            // area in install, so that the fill is the first edit of the session - like the plain
+            // text views, a Ctrl+Z then takes the fresh view back to the empty text area.
+            document =
+                    ChunkedTextLoader.buildDocument(
+                            "", style, split, () -> gen != generation, editable);
+            if (document == null) {
+                return;
+            }
+        } else {
+            document =
+                    ChunkedTextLoader.buildDocument(
+                            split.displayText(), style, split, () -> gen != generation, editable);
+            if (document == null) {
+                return;
+            }
         }
         final int installedLineCount = maxLineNumber;
         SwingUtilities.invokeLater(
@@ -377,7 +436,7 @@ public class PrettifyHttpPanelView
                     if (gen != generation) {
                         return;
                     }
-                    install(raw, split, lineNumbers, installedLineCount, document);
+                    install(raw, split, lineNumbers, installedLineCount, document, style);
                 });
     }
 
@@ -442,22 +501,52 @@ public class PrettifyHttpPanelView
             DisplayTextSplitter.Split split,
             int[] lineNumbers,
             int maxLineNumber,
-            RSyntaxDocument document) {
+            RSyntaxDocument document,
+            String style) {
         rawText = raw;
         displaySource = split.displayText();
+        // The message shown last decides whether this install refreshes the session of the
+        // message already shown, or whether ZAP swapped a different message into the panel.
+        Message previouslyShownMessage = shownMessage;
         shownMessage = model.getMessage();
-        ChunkedTextLoader.installDocument(
-                textArea,
-                document,
-                () -> {
-                    textArea.discardAllEdits();
-                    textArea.setMessageText(raw);
-                });
+        if (editable && document == sessionDocument && textArea.getDocument() == document) {
+            if (previouslyShownMessage != shownMessage) {
+                // A different message is shown now, so the entries of an earlier session must
+                // never resurface in this editor: the edit session starts over, like every tab
+                // of Repeater or the manual request editor owns the history of its request
+                // alone. The session starts with the new request shown and nothing on record,
+                // so undo has no history of the earlier request and no empty text area in it.
+                startSession();
+            } else {
+                // The same message is re-rendered (a header was mutated, the message was
+                // echoed): the whole render is recorded as one atomic edit with the state of
+                // the document around it, so undo walks between the rendered states of this
+                // message and the user's edits, without ever emptying the text area on the way.
+                fillSession();
+            }
+        } else {
+            ChunkedTextLoader.installDocument(
+                    textArea, document, () -> textArea.discardAllEdits());
+            trackUserEdits();
+            if (editable) {
+                // A new editable document is the start (or the epoch) of an edit session: the
+                // document was built empty and the message is filled in now, which is not part
+                // of the history - the session starts at the message, with no state before it
+                // to undo back to, and with no earlier session to carry anything over from.
+                sessionDocument = document;
+                sessionStyle = style;
+                startSession();
+            }
+        }
+        textArea.setMessageText(raw);
         textArea.applyManagerHighlights();
         int numberedLines = applyLineNumbering(split, lineNumbers, maxLineNumber);
-        trackUserEdits();
         installedDigits = digits(numberedLines);
-        // The document is the message as it was loaded, so an earlier edit is gone.
+        // The document shows the message as the model has it: nothing is waiting to be saved back.
+        // In the session path of a same-message re-render the earlier user edits are not lost
+        // either - they are retrievable with undo - but they no longer differ from the shown
+        // message after the re-render. In the session path of a message swap the session is
+        // fresh, so an unsaved edit made in the earlier request is gone with its history.
         changed = false;
         restoreCaret();
         restoreScroll();
@@ -476,6 +565,58 @@ public class PrettifyHttpPanelView
             installCheck.setRepeats(false);
         }
         installCheck.restart();
+    }
+
+    /**
+     * Starts the edit session on the document the session keeps. Must run on the Event Dispatch
+     * Thread.
+     *
+     * <p>The session starts with the message shown and nothing on record: whatever another
+     * request or an earlier state of this one had - however it was rendered or edited - is not
+     * in the history, and no Ctrl+Z can bring it or any empty text area back into this editor.
+     * Undo becomes usable with the first edit the user makes on the message.
+     */
+    private void startSession() {
+        textArea.setText(displaySource);
+        textArea.discardAllEdits();
+    }
+
+    /**
+     * Refreshes the session document through the text area. Must run on the Event Dispatch
+     * Thread.
+     *
+     * <p>The whole re-render is one undoable edit: the swap runs inside an atomic edit, which the
+     * undo manager keeps as a single step with the state of the document around it, so a Ctrl+Z
+     * of a fill takes the state the view displayed before the re-render back directly - never
+     * through any emptied text area and never merged into one step with the edit the user made
+     * right before it. A re-render that shows what the document already shows is no state at all
+     * and records nothing. An empty message wipes the history, like the core plain text views
+     * discard it around their empty fill: there is nothing documented state left that the earlier
+     * history could return to. A re-render that starts the fill from the emptied document keeps
+     * the transition out of the history too: there is no earlier state to walk back to.
+     */
+    private void fillSession() {
+        String before = textArea.getText();
+        String after = displaySource;
+        if (before.equals(after)) {
+            return;
+        }
+        if (after.isEmpty()) {
+            textArea.setText("");
+            textArea.discardAllEdits();
+            return;
+        }
+        if (before.isEmpty()) {
+            textArea.setText(after);
+            textArea.discardAllEdits();
+            return;
+        }
+        textArea.beginAtomicEdit();
+        try {
+            textArea.setText(after);
+        } finally {
+            textArea.endAtomicEdit();
+        }
     }
 
     /**
@@ -810,16 +951,6 @@ public class PrettifyHttpPanelView
     }
 
     /**
-     * Drops the shared font-width cache. Called from the add-on's unload so the measured tables
-     * (which can hold a full BMP-width array per font) are not retained after the add-on is gone.
-     */
-    static void clearFontWidths() {
-        synchronized (CHAR_WIDTHS) {
-            CHAR_WIDTHS.clear();
-        }
-    }
-
-    /**
      * Per-code-point rendered widths for the wrap. Characters the font does not have a monospaced
      * glyph for (binary bodies, control pictures, CJK fallback, ...) are wider than {@code 'M'}, so
      * wrapping by character count would overflow the viewport; the splitter wraps by these measured
@@ -865,25 +996,20 @@ public class PrettifyHttpPanelView
         private final double monospaceAdvance;
         private final double tabWidth;
 
+        /**
+         * Whether every printable ASCII character is exactly {@link #monospaceAdvance} wide. The
+         * wrap loop asks for a width per character; for such a font the answer needs neither a
+         * table lookup nor the (shared) lock, which keeps splitting an HTTP message contention-free.
+         */
+        private final boolean fastAscii;
+
         /** Widths for code points below {@link #cacheLimit}; grown only as wide characters appear. */
         private double[] cache = new double[0x100];
 
         private int cacheLimit = 0x100;
 
-        /**
-         * Widths for supplementary code points (and any code point above {@link #cacheLimit}).
-         * Bounded by an access-ordered window so a message with many distinct wide characters
-         * cannot grow the shared cache without limit.
-         */
-        private final Map<Integer, Double> wide =
-                new LinkedHashMap<Integer, Double>(16, 0.75f, true) {
-                    private static final long serialVersionUID = 1L;
-
-                    @Override
-                    protected boolean removeEldestEntry(Map.Entry<Integer, Double> eldest) {
-                        return size() > MAX_WIDE_WIDTHS;
-                    }
-                };
+        /** Widths for supplementary code points (and any code point above {@link #cacheLimit}). */
+        private final Map<Integer, Double> wide = new HashMap<>();
 
         FontCharWidths(
                 Font font,
@@ -896,10 +1022,38 @@ public class PrettifyHttpPanelView
             this.metrics = metrics;
             this.monospaceAdvance = monospaceAdvance;
             this.tabWidth = tabWidth;
+            this.fastAscii = isFastAscii(font, metrics, monospaceAdvance);
+        }
+
+        /**
+         * Whether the printable ASCII range ({@code 0x20} to {@code 0x7E}) renders at exactly the
+         * monospace advance. Same rule {@link #measuredWidth} applies, checked once for the range.
+         */
+        private static boolean isFastAscii(Font font, FontMetrics metrics, double monospaceAdvance) {
+            if (monospaceAdvance <= 0) {
+                return false;
+            }
+            int expected = (int) Math.round(monospaceAdvance);
+            for (int codePoint = 0x20; codePoint <= 0x7E; codePoint++) {
+                if (!font.canDisplay(codePoint)
+                        || Math.abs(metrics.charWidth(codePoint) - expected) > 1) {
+                    return false;
+                }
+            }
+            return true;
         }
 
         @Override
-        public synchronized double widthOf(int codePoint) {
+        public double widthOf(int codePoint) {
+            if (fastAscii && codePoint >= 0x20 && codePoint <= 0x7E) {
+                // No lookup and no lock: immutable state only touched here, so the wrap loop
+                // never contends on the shared table for an ordinary message.
+                return monospaceAdvance;
+            }
+            return widthOfMeasured(codePoint);
+        }
+
+        private synchronized double widthOfMeasured(int codePoint) {
             if (codePoint == '\t') {
                 return tabWidth;
             }
@@ -1110,6 +1264,10 @@ public class PrettifyHttpPanelView
         String saved = model.getData();
         rawText =
                 saved != null && TextAlignment.sameNonWhitespace(saved, edited) ? saved : newRaw;
+        // The text area keeps its own copy of the raw message for selection-to-received-text
+        // mapping; an editable view is not recompiled here, so mirror the saved raw manually to
+        // keep the two in step (a reinstall would do it, but a body view keeps its document).
+        textArea.setMessageText(rawText);
         displaySource = edited;
         rememberBody();
         // The body is in the message now, so the request can be given the content type it has.
@@ -1122,6 +1280,14 @@ public class PrettifyHttpPanelView
                     TextAlignment.nonWhitespaceBefore(edited, textArea.getCaretPosition());
             pendingScrollValue = scrollPane.getVerticalScrollBar().getValue();
             updateInternal();
+        } else if (sessionDocument != null && textArea.getDocument() == sessionDocument) {
+            // The core plain text views re-read the model into their text area on the
+            // notification of the save itself; the notification of this save is swallowed (the
+            // saving flag, see dataChanged), so the re-read is done here directly. The view
+            // already shows the text that was saved, so the render adds nothing - no state and
+            // no undo step round the send.
+            fillSession();
+            changed = false;
         }
     }
 
@@ -1157,6 +1323,11 @@ public class PrettifyHttpPanelView
             // A view that cannot be edited must not carry changes into the message.
             changed = false;
             textArea.discardAllEdits();
+            // The edit session ends with the editability (RTextArea installs a fresh undo manager
+            // for the document of the read-only view anyway): a view that becomes editable again
+            // starts a new session instead of carrying one that is not behind the document shown.
+            sessionDocument = null;
+            sessionStyle = null;
         }
         if (model.getMessage() != null) {
             // The request may carry a body that says what it is; the header is filled in before
@@ -1207,13 +1378,21 @@ public class PrettifyHttpPanelView
             data = "";
         }
         if (data.equals(rawText)
-                || (model.getMessage() == shownMessage
-                        && TextAlignment.sameNonWhitespace(data, rawText))) {
-            // The model still holds the text the current document was built from. Keeping the
-            // document keeps the user's edits and their undo history; rebuilding it here was what
-            // made Ctrl+Z stop working after a send. A whitespace-only difference (line endings or
-            // a trailing newline the model normalises) does not change what the view shows, but a
-            // different message always gets its own document.
+                && editable
+                && sessionDocument != null
+                && textArea.getDocument() == sessionDocument
+                && model.getMessage() == shownMessage) {
+            // The model still holds the text the session document shows, and shows the message
+            // the session is about. The view is refreshed with what it shows anyway (like the
+            // plain text views re-read their document on every notification); when the text is
+            // what the document already has, the refresh records nothing - there is no state to
+            // step back to in it. A different message goes through the install, which starts the
+            // session over so nothing of the earlier session resurfaces. A whole re-render would
+            // rebuild the split and the scroll state around the same document; the fill of the
+            // session document is all the notification adds to the view.
+            fillSession();
+            changed = false;
+            rememberBody();
             return;
         }
         update();
@@ -1297,7 +1476,6 @@ public class PrettifyHttpPanelView
             case "POST":
             case "PUT":
             case "PATCH":
-            case "UPDATE":
                 return true;
             default:
                 return false;
@@ -1319,19 +1497,32 @@ public class PrettifyHttpPanelView
             String body = bodyOf(data);
             String method = methodOf(data);
             if (body != null && !body.isEmpty()) {
-                String remembered = lastShownBody;
-                boolean methodChanged = !method.equals(lastShownMethod);
-                if (!changed
-                        && !remembered.isEmpty()
-                        && !body.equals(remembered)
-                        && (methodChanged || body.equals(remembered + "="))) {
-                    // ZAP moved the body into the query string and back again: the body it puts
-                    // back is not the body that was there (it re-encodes a parameter without a
-                    // value as "name=").
-                    setBodyOf(data, remembered);
-                    data = model.getData();
+                if (model.getMessage() == lastShownMessage) {
+                    String remembered = lastShownBody;
+                    boolean methodChanged = !method.equals(lastShownMethod);
+                    if (!changed
+                            && !remembered.isEmpty()
+                            && !body.equals(remembered)
+                            && (methodChanged || body.equals(remembered + "="))) {
+                        // ZAP moved the body into the query string and back again: the body it
+                        // puts back is not the body that was there (it re-encodes a parameter
+                        // without a value as "name=").
+                        setBodyOf(data, remembered);
+                        if (methodChanged && !lastShownQuery.isEmpty()) {
+                            // The query ZAP moves back into the body is not only the body that was
+                            // moved out: it takes the parameters that were in the URL before (for
+                            // example a key in the query string of an API endpoint) with it, so the
+                            // query that was there before is put back.
+                            setQueryOf(lastShownQuery);
+                        }
+                        data = model.getData();
+                    }
+                    rememberBody();
                 }
-                rememberBody();
+                // A different message is being shown: the body the pair carries belongs to another
+                // request and the change of the method (for all that is known here) happened while
+                // another message was shown. Its install re-pairs the state with this message, so
+                // nothing is restored from an earlier one here.
             }
             // An empty body is not remembered: the body is empty while it is in the query string,
             // and it is the body that was there before that has to be remembered.
@@ -1363,10 +1554,22 @@ public class PrettifyHttpPanelView
      */
     private void rememberBody() {
         String body = bodyOf(model.getData());
+        if (model.getMessage() != lastShownMessage) {
+            // A different message is being shown: what was remembered for the previous request is
+            // not this one's. The reset also stores an empty body, so that the next request without
+            // a body (for example a GET) does not get the previous request's body back from here
+            // when the verb is changed to one that carries a body.
+            lastShownMessage = model.getMessage();
+            lastShownBody = body == null ? "" : body;
+            lastShownQuery = queryOf();
+            lastShownMethod = methodOf(model.getData());
+            return;
+        }
         if (body == null || body.isEmpty()) {
             return;
         }
         lastShownBody = body;
+        lastShownQuery = queryOf();
     }
 
     /** The request body of the message data, or null when this view does not show a body. */
@@ -1393,6 +1596,49 @@ public class PrettifyHttpPanelView
         int split = data == null ? -1 : data.indexOf("\n\n");
         String header = split < 0 ? "" : data.substring(0, split);
         model.setData(header + "\n\n" + body);
+    }
+
+    /**
+     * The query string of the request URI, escaped as the URI shows it, or an empty string when
+     * this view does not show a request or the URI has no query.
+     *
+     * <p>The escaped form is kept so that putting it back reproduces the query exactly; the decoded
+     * form would be re-encoded (a second time by ZAP when it moves the query back into the body)
+     * and encode characters the way ZAP does, not the way the request had them.
+     */
+    private String queryOf() {
+        URI uri = uriOf();
+        return uri == null ? "" : nullToEmpty(uri.getEscapedQuery());
+    }
+
+    /** Writes the query string of the request URI back into the message header. */
+    private void setQueryOf(String escapedQuery) {
+        URI uri = uriOf();
+        if (uri == null) {
+            return;
+        }
+        try {
+            uri.setEscapedQuery(escapedQuery);
+        } catch (URIException e) {
+            LOGGER.warn("Could not put back the query string of the request.", e);
+        }
+    }
+
+    /** The request URI the message carries, or {@code null} when this view shows none. */
+    private URI uriOf() {
+        if (target != Target.REQUEST_BODY && target != Target.REQUEST_ALL) {
+            return null;
+        }
+        Message message = model.getMessage();
+        if (!(message instanceof HttpMessage)) {
+            return null;
+        }
+        HttpRequestHeader header = ((HttpMessage) message).getRequestHeader();
+        return header == null ? null : header.getURI();
+    }
+
+    private static String nullToEmpty(String s) {
+        return s == null ? "" : s;
     }
 
     @Override

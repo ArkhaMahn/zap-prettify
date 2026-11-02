@@ -41,6 +41,14 @@ public class ExtensionPrettify extends ExtensionAdaptor {
     private static final String VIEW_REQUEST_ALL = "PrettifyRequestAll";
     private static final String VIEW_RESPONSE_ALL = "PrettifyResponseAll";
 
+    // HttpPanelManager identifies a view factory by its component name ("RequestSplit", ...),
+    // which must be repeated verbatim on removal. A typo would silently strand views or factories
+    // at unload, so the four strings are constants shared by hook() and unload().
+    private static final String COMPONENT_REQUEST_SPLIT = "RequestSplit";
+    private static final String COMPONENT_RESPONSE_SPLIT = "ResponseSplit";
+    private static final String COMPONENT_REQUEST_ALL = "RequestAll";
+    private static final String COMPONENT_RESPONSE_ALL = "ResponseAll";
+
     public ExtensionPrettify() {
         super(NAME);
     }
@@ -69,7 +77,7 @@ public class ExtensionPrettify extends ExtensionAdaptor {
         PrettifyTextActions.init();
         HttpPanelManager panelManager = HttpPanelManager.getInstance();
         panelManager.addRequestViewFactory(
-                "RequestSplit",
+                COMPONENT_REQUEST_SPLIT,
                 new SplitViewFactory(
                         VIEW_REQUEST_SPLIT_HEADER,
                         RequestSplitComponent.ViewComponent.HEADER,
@@ -77,7 +85,7 @@ public class ExtensionPrettify extends ExtensionAdaptor {
                         PrettifyHttpPanelView.Target.REQUEST_HEAD,
                         RequestHeaderStringHttpPanelViewModel::new));
         panelManager.addRequestViewFactory(
-                "RequestSplit",
+                COMPONENT_REQUEST_SPLIT,
                 new SplitViewFactory(
                         VIEW_REQUEST_SPLIT_BODY,
                         RequestSplitComponent.ViewComponent.BODY,
@@ -85,7 +93,7 @@ public class ExtensionPrettify extends ExtensionAdaptor {
                         PrettifyHttpPanelView.Target.REQUEST_BODY,
                         RequestBodyStringHttpPanelViewModel::new));
         panelManager.addResponseViewFactory(
-                "ResponseSplit",
+                COMPONENT_RESPONSE_SPLIT,
                 new SplitViewFactory(
                         VIEW_RESPONSE_SPLIT_HEADER,
                         RequestSplitComponent.ViewComponent.HEADER,
@@ -93,7 +101,7 @@ public class ExtensionPrettify extends ExtensionAdaptor {
                         PrettifyHttpPanelView.Target.RESPONSE_HEAD,
                         ResponseHeaderStringHttpPanelViewModel::new));
         panelManager.addResponseViewFactory(
-                "ResponseSplit",
+                COMPONENT_RESPONSE_SPLIT,
                 new SplitViewFactory(
                         VIEW_RESPONSE_SPLIT_BODY,
                         RequestSplitComponent.ViewComponent.BODY,
@@ -101,14 +109,14 @@ public class ExtensionPrettify extends ExtensionAdaptor {
                         PrettifyHttpPanelView.Target.RESPONSE_BODY,
                         ResponseBodyStringHttpPanelViewModel::new));
         panelManager.addRequestViewFactory(
-                "RequestAll",
+                COMPONENT_REQUEST_ALL,
                 new AllViewFactory(
                         VIEW_REQUEST_ALL,
                         "prettify/http-request",
                         PrettifyHttpPanelView.Target.REQUEST_ALL,
                         RequestStringHttpPanelViewModel::new));
         panelManager.addResponseViewFactory(
-                "ResponseAll",
+                COMPONENT_RESPONSE_ALL,
                 new AllViewFactory(
                         VIEW_RESPONSE_ALL,
                         "prettify/http-response",
@@ -129,29 +137,68 @@ public class ExtensionPrettify extends ExtensionAdaptor {
             // the instances already mounted on the open request/response panels. Both steps are
             // required: the view removal is what makes the tab disappear immediately, without a
             // restart.
-            safe(() -> panelManager.removeRequestViewFactory("RequestSplit", VIEW_REQUEST_SPLIT_HEADER), "request header view factory");
-            safe(() -> panelManager.removeRequestViewFactory("RequestSplit", VIEW_REQUEST_SPLIT_BODY), "request body view factory");
-            safe(() -> panelManager.removeResponseViewFactory("ResponseSplit", VIEW_RESPONSE_SPLIT_HEADER), "response header view factory");
-            safe(() -> panelManager.removeResponseViewFactory("ResponseSplit", VIEW_RESPONSE_SPLIT_BODY), "response body view factory");
-            safe(() -> panelManager.removeRequestViewFactory("RequestAll", VIEW_REQUEST_ALL), "request view factory");
-            safe(() -> panelManager.removeResponseViewFactory("ResponseAll", VIEW_RESPONSE_ALL), "response view factory");
+            safe(() -> {
+                panelManager.removeRequestViewFactory(
+                        COMPONENT_REQUEST_SPLIT, VIEW_REQUEST_SPLIT_HEADER);
+            }, "request header view factory");
+            safe(() -> {
+                panelManager.removeRequestViewFactory(
+                        COMPONENT_REQUEST_SPLIT, VIEW_REQUEST_SPLIT_BODY);
+            }, "request body view factory");
+            safe(() -> {
+                panelManager.removeResponseViewFactory(
+                        COMPONENT_RESPONSE_SPLIT, VIEW_RESPONSE_SPLIT_HEADER);
+            }, "response header view factory");
+            safe(() -> {
+                panelManager.removeResponseViewFactory(
+                        COMPONENT_RESPONSE_SPLIT, VIEW_RESPONSE_SPLIT_BODY);
+            }, "response body view factory");
+            safe(() -> {
+                panelManager.removeRequestViewFactory(COMPONENT_REQUEST_ALL, VIEW_REQUEST_ALL);
+            }, "request view factory");
+            safe(() -> {
+                panelManager.removeResponseViewFactory(COMPONENT_RESPONSE_ALL, VIEW_RESPONSE_ALL);
+            }, "response view factory");
 
-            safe(() -> panelManager.removeRequestViews("RequestSplit", VIEW_REQUEST_SPLIT_HEADER, RequestSplitComponent.ViewComponent.HEADER), "request header views");
-            safe(() -> panelManager.removeRequestViews("RequestSplit", VIEW_REQUEST_SPLIT_BODY, RequestSplitComponent.ViewComponent.BODY), "request body views");
-            safe(() -> panelManager.removeResponseViews("ResponseSplit", VIEW_RESPONSE_SPLIT_HEADER, RequestSplitComponent.ViewComponent.HEADER), "response header views");
-            safe(() -> panelManager.removeResponseViews("ResponseSplit", VIEW_RESPONSE_SPLIT_BODY, RequestSplitComponent.ViewComponent.BODY), "response body views");
-            safe(() -> panelManager.removeRequestViews("RequestAll", VIEW_REQUEST_ALL, null), "request views");
-            safe(() -> panelManager.removeResponseViews("ResponseAll", VIEW_RESPONSE_ALL, null), "response views");
+            safe(() -> {
+                panelManager.removeRequestViews(
+                        COMPONENT_REQUEST_SPLIT,
+                        VIEW_REQUEST_SPLIT_HEADER,
+                        RequestSplitComponent.ViewComponent.HEADER);
+            }, "request header views");
+            safe(() -> {
+                panelManager.removeRequestViews(
+                        COMPONENT_REQUEST_SPLIT,
+                        VIEW_REQUEST_SPLIT_BODY,
+                        RequestSplitComponent.ViewComponent.BODY);
+            }, "request body views");
+            safe(() -> {
+                panelManager.removeResponseViews(
+                        COMPONENT_RESPONSE_SPLIT,
+                        VIEW_RESPONSE_SPLIT_HEADER,
+                        RequestSplitComponent.ViewComponent.HEADER);
+            }, "response header views");
+            safe(() -> {
+                panelManager.removeResponseViews(
+                        COMPONENT_RESPONSE_SPLIT,
+                        VIEW_RESPONSE_SPLIT_BODY,
+                        RequestSplitComponent.ViewComponent.BODY);
+            }, "response body views");
+            safe(() -> {
+                panelManager.removeRequestViews(COMPONENT_REQUEST_ALL, VIEW_REQUEST_ALL, null);
+            }, "request views");
+            safe(() -> {
+                panelManager.removeResponseViews(COMPONENT_RESPONSE_ALL, VIEW_RESPONSE_ALL, null);
+            }, "response views");
         }
         // These are process-wide resources that may have been created even when no view was ever
         // shown (for example by a headless or partial hook, or by a background split still in
         // flight), so their cleanup must not depend on getView().
         PrettifyTextActions.remove();
         PrettifyExecutor.shutdown();
-        // Clear the caches after stopping the workers so a finishing split cannot immediately
-        // repopulate them.
+        // Clear the cache after stopping the workers so a finishing split cannot immediately
+        // repopulate it.
         DisplayTextSplitter.clearCache();
-        PrettifyHttpPanelView.clearFontWidths();
     }
 
     /** Runs one removal, logging and continuing on failure so unload cannot stop half-way. */

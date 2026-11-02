@@ -32,19 +32,6 @@ public final class ChunkedTextLoader {
      * Builds a syntax document for {@code text} with {@code styleKey}, checking {@code cancelled}
      * between slices. Returns {@code null} if the build was cancelled or failed; the caller must then
      * leave the existing document in place.
-     */
-    public static RSyntaxDocument buildDocument(
-            String text,
-            String styleKey,
-            DisplayTextSplitter.Split split,
-            BooleanSupplier cancelled) {
-        return buildDocument(text, styleKey, split, cancelled, false);
-    }
-
-    /**
-     * Builds a syntax document for {@code text} with {@code styleKey}, checking {@code cancelled}
-     * between slices. Returns {@code null} if the build was cancelled or failed; the caller must then
-     * leave the existing document in place.
      *
      * <p>An editable document is a plain one: the wrapped rows of a {@link PrettifyDocument} carry
      * the tokens of the unwrapped text, which does not survive an edit made in the text area.

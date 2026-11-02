@@ -167,45 +167,24 @@ public class PrettifyDocument extends RSyntaxDocument {
     }
 
     /**
-     * Notes that the text was changed: the recorded tokens no longer describe the document, the
-     * cached line tokens no longer match the text, and the line states carried from the top are
-     * stale from the edited line on, so they are recomputed from the text as it is now.
+     * Notes that the text was changed: the recorded tokens no longer describe the document, and the
+     * line states carried from the top are stale from the edited line on, so they are recomputed
+     * from the text as it is now.
      */
     private void markEdited(DocumentEvent e) {
         edited = true;
+        // A cached token list is the rendering of the text as it was: after a change, the next
+        // repaint must tokenize (or replay) the line again, or it would paint the text of a
+        // previous state of the document. A whole-document fill such as a re-render lands here
+        // through its removal and insertion updates, so the cache never crosses a fill either.
         cachedTokenLine = -1;
         cachedTokenList = null;
         int offset = e.getOffset();
         if (offset < 0) {
             return;
         }
-        if (http && isHeaderOffset(offset)) {
-            // Editing the header block can change the body delegate (Content-Type, for example),
-            // so the token maker's own header/body state has to be rebuilt from the top rather
-            // than resumed from the edited line.
-            if (stateTokenMaker instanceof HttpTokenMaker) {
-                ((HttpTokenMaker) stateTokenMaker).resetForEdit();
-            }
-            computedUpTo = -1;
-            return;
-        }
         int line = getDefaultRootElement().getElementIndex(offset);
         computedUpTo = Math.max(-1, line - 1);
-    }
-
-    /**
-     * Whether {@code offset} is inside the header block. The separator is searched within the same
-     * bounded scan used elsewhere; when no separator is found in that window an edit near the top
-     * is treated as a header edit while one deep in the message is treated as a body edit, so a
-     * message with an enormous header block does not re-tokenize from its first line on every
-     * keystroke.
-     */
-    private boolean isHeaderOffset(int offset) {
-        int bodyStart = bodyStart();
-        if (bodyStart >= 0) {
-            return offset < bodyStart;
-        }
-        return offset <= MAX_HEADER_SCAN;
     }
 
     /** Notes an edit of the text: the rows that continue a line move with it. */
@@ -413,37 +392,23 @@ public class PrettifyDocument extends RSyntaxDocument {
 
     /**
      * The lowercased {@code Content-Type} header value of an HTTP message, or null when the header
-     * block has no such header. Package-private so the header-line parsing can be asserted
-     * directly.
+     * block has no such header.
      */
-    String bodyContentType() {
+    private String bodyContentType() {
         String headers = headerBlock();
         if (headers == null) {
             return null;
         }
-        int at = 0;
-        while (at < headers.length()) {
-            int lineEnd = headers.indexOf('\n', at);
-            if (lineEnd < 0) {
-                lineEnd = headers.length();
-            }
-            int lineStop = lineEnd;
-            if (lineStop > at && headers.charAt(lineStop - 1) == '\r') {
-                lineStop--;
-            }
-            int nameStart = at;
-            while (nameStart < lineStop
-                    && (headers.charAt(nameStart) == ' ' || headers.charAt(nameStart) == '\t')) {
-                nameStart++;
-            }
-            int colon = headers.indexOf(':', nameStart);
-            if (colon >= 0 && colon < lineStop
-                    && "content-type".equals(headers.substring(nameStart, colon).trim())) {
-                return headers.substring(colon + 1, lineStop).trim();
-            }
-            at = lineEnd + 1;
+        int at = headers.indexOf("content-type:");
+        if (at < 0) {
+            return null;
         }
-        return null;
+        String value = headers.substring(at + "content-type:".length());
+        int eol = value.indexOf('\n');
+        if (eol >= 0) {
+            value = value.substring(0, eol);
+        }
+        return value;
     }
 
     /** Offset of the first body byte (just past the blank line ending the headers), or -1. */

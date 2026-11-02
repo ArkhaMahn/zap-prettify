@@ -28,6 +28,7 @@ import org.fife.ui.rtextarea.RTextAreaUI;
 import org.fife.ui.rtextarea.RTextScrollPane;
 import org.fife.ui.rtextarea.RUndoManager;
 import org.zaproxy.zap.utils.DisplayUtils;
+import org.zaproxy.zap.utils.FontUtils;
 import org.zaproxy.zap.view.HighlightSearchEntry;
 import org.zaproxy.zap.view.HighlighterManager;
 
@@ -63,12 +64,13 @@ public class PrettifyTextArea extends RSyntaxTextArea {
     private static final int MIN_EXTRA_LINE_HEIGHT = 2;
 
     /**
-     * The editor's default HTTP message font family. The add-on does not bundle a font and instead
-     * uses this system monospaced font.
+     * The editor's fallback HTTP message font family, used when no monospaced font can be taken
+     * from ZAP's configuration. The add-on does not bundle a font and instead uses this system
+     * monospaced font.
      */
     private static final String EDITOR_FONT_FAMILY = "Courier New";
 
-    /** The editor's default HTTP message font size, in points. */
+    /** The font size of the fallback HTTP message font, in points. */
     private static final int EDITOR_FONT_SIZE = 13;
 
     private static final TokenMakerFactory TOKEN_MAKER_FACTORY =
@@ -616,16 +618,57 @@ public class PrettifyTextArea extends RSyntaxTextArea {
     }
 
     /**
-     * The editor's default HTTP message font, independent of ZAP's configured "work panels" font.
-     * Plain style is forced because the wrapped syntax view overlaps its rows (and so garbles long
-     * wrapped lines) when the text area font is bold. Falls back to the platform monospaced font
-     * when {@value #EDITOR_FONT_FAMILY} is not installed.
+     * The HTTP message font: the monospaced font configured for ZAP's work panels
+     * (Tools, Options, Font) when there is one, otherwise the fallback monospaced font. The plain
+     * style is forced because the wrapped syntax view overlaps its rows (and so garbles long
+     * wrapped lines) when the text area font is bold.
+     *
+     * <p>The wrap model measures characters like the painter does, and the fast advance paths
+     * assume a monospace, so a suitably chosen configured font is adopted but a proportional one is
+     * not: the fallback monospaced font keeps the pre-split rows well-formed in that case.
      */
     private static Font editorFont() {
+        Font configured = configuredMonospaceFont();
+        if (configured != null) {
+            return configured;
+        }
         Font font = new Font(EDITOR_FONT_FAMILY, Font.PLAIN, EDITOR_FONT_SIZE);
         if (!EDITOR_FONT_FAMILY.equalsIgnoreCase(font.getFamily())) {
             font = new Font(Font.MONOSPACED, Font.PLAIN, EDITOR_FONT_SIZE);
         }
         return font;
+    }
+
+    /** ZAP's configured work-panels font, or {@code null} when it is not a usable monospace. */
+    private static Font configuredMonospaceFont() {
+        // FontUtils depends on ZAP's startup having registered the font types; without it (headless
+        // tooling, tests) it can fail with a runtime exception. Any failure means "not configured",
+        // so the fallback font applies - rendering must not depend on the font plumbing.
+        try {
+            Font configured = FontUtils.getFont(FontUtils.FontType.workPanels);
+            if (configured != null && isMonospaced(configured)) {
+                return configured.deriveFont(Font.PLAIN);
+            }
+        } catch (RuntimeException e) {
+            LOGGER.debug("Could not read ZAP's work panels font; using the fallback.", e);
+        }
+        return null;
+    }
+
+    /** Whether {@code i} and {@code M} advance by the same width, i.e. the font is monospaced. */
+    private static boolean isMonospaced(Font font) {
+        if (font == null) {
+            return false;
+        }
+        FontRenderContext frc = new FontRenderContext(null, true, true);
+        try {
+            double advance = font.createGlyphVector(frc, "M").getGlyphPosition(1).getX();
+            return advance > 0
+                    && Math.abs(font.createGlyphVector(frc, "i").getGlyphPosition(1).getX() - advance)
+                            < 0.01;
+        } catch (RuntimeException e) {
+            // Glyph-level failure (indirect layout, missing font): treat as non-monospaced.
+            return false;
+        }
     }
 }
