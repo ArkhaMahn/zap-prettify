@@ -2,7 +2,6 @@ package org.zaproxy.zap.extension.prettify;
 
 import java.awt.Container;
 import java.awt.Font;
-import java.awt.FontMetrics;
 import java.awt.Toolkit;
 import java.awt.datatransfer.Clipboard;
 import java.awt.datatransfer.DataFlavor;
@@ -124,16 +123,13 @@ public class PrettifyTextArea extends RSyntaxTextArea {
         if (font == advanceFont) {
             return cachedAdvance;
         }
-        FontMetrics metrics = getFontMetrics(font);
-        int charWidth = metrics.charWidth('M');
-        if (metrics.charWidth('i') != charWidth || metrics.charWidth('W') != charWidth) {
-            advanceFont = font;
+        advanceFont = font;
+        if (!isMonospaced(font)) {
             cachedAdvance = 0;
             return 0;
         }
         FontRenderContext frc = new FontRenderContext(null, true, true);
         double advance = font.createGlyphVector(frc, "M").getGlyphPosition(1).getX();
-        advanceFont = font;
         cachedAdvance = advance;
         return advance;
     }
@@ -287,8 +283,32 @@ public class PrettifyTextArea extends RSyntaxTextArea {
         this.pasteFormatter = formatter;
     }
 
-    /**
-     * Formats a pasted body before inserting it. The formatted text is inserted as one atomic edit,
+    /** Bridges the view's content-type toggle to the popup menu entry of the text area. */
+    interface ContentTypeToggle {
+
+        /** Whether saving the message adds the Content-Type the body implies. */
+        boolean isOn();
+
+        /** Sets whether saving the message adds the Content-Type the body implies. */
+        void setOn(boolean on);
+
+        /** Whether the message shown can be saved from this view (editable request views only). */
+        boolean isApplicable();
+    }
+
+    private ContentTypeToggle contentTypeToggle;
+
+    /** Called by the view, so the popup menu can offer the view's content-type decision. */
+    void setContentTypeToggle(ContentTypeToggle toggle) {
+        this.contentTypeToggle = toggle;
+    }
+
+    /** The view's content-type toggle, or {@code null} when the view does not offer one. */
+    ContentTypeToggle contentTypeToggle() {
+        return contentTypeToggle;
+    }
+
+    /** Formats a pasted body before inserting it. The formatted text is inserted as one atomic edit,
      * so a single undo removes the whole paste.
      */
     @Override
@@ -655,8 +675,14 @@ public class PrettifyTextArea extends RSyntaxTextArea {
         return null;
     }
 
-    /** Whether {@code i} and {@code M} advance by the same width, i.e. the font is monospaced. */
-    private static boolean isMonospaced(Font font) {
+    /**
+     * Whether {@code i}, {@code M} and {@code W} advance by the same width, i.e. the font is
+     * monospaced for the way the view paints it (fractional advances). This is the one shared
+     * predicate: the font selection, the text area's cached advance and the wrap-width table all
+     * accept the same fonts, so a font picked as monospaced is one every consumer of its advance
+     * agrees on.
+     */
+    static boolean isMonospaced(Font font) {
         if (font == null) {
             return false;
         }
@@ -665,6 +691,8 @@ public class PrettifyTextArea extends RSyntaxTextArea {
             double advance = font.createGlyphVector(frc, "M").getGlyphPosition(1).getX();
             return advance > 0
                     && Math.abs(font.createGlyphVector(frc, "i").getGlyphPosition(1).getX() - advance)
+                            < 0.01
+                    && Math.abs(font.createGlyphVector(frc, "W").getGlyphPosition(1).getX() - advance)
                             < 0.01;
         } catch (RuntimeException e) {
             // Glyph-level failure (indirect layout, missing font): treat as non-monospaced.

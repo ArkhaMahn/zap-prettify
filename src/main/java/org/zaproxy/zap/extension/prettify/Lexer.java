@@ -4,7 +4,6 @@ import javax.swing.text.Segment;
 import org.fife.ui.rsyntaxtextarea.RSyntaxUtilities;
 import org.fife.ui.rsyntaxtextarea.Token;
 import org.fife.ui.rsyntaxtextarea.TokenMaker;
-import org.fife.ui.rsyntaxtextarea.TokenMakerFactory;
 import org.fife.ui.rsyntaxtextarea.TokenTypes;
 
 /**
@@ -50,7 +49,9 @@ final class Lexer {
     static Lexer of(String styleKey, String body) {
         TokenMaker tm;
         try {
-            tm = TokenMakerFactory.getDefaultInstance().getTokenMaker(styleKey);
+            // Resolve through the Prettify factory, exactly as the display tokenization does, so
+            // every style (including a Prettify-only one) classifies the way the view paints it.
+            tm = PrettifyTokenMakerFactory.bodyTokenMaker(styleKey);
         } catch (RuntimeException e) {
             return null;
         }

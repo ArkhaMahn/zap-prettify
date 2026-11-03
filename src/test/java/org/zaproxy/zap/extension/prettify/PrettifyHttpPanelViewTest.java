@@ -123,7 +123,7 @@ class PrettifyHttpPanelViewTest {
     }
 
     @Test
-    void aMissingContentTypeIsStillAddedFromTheBody() throws Exception {
+    void aMissingContentTypeIsOnlyAddedWhenTheMessageIsSaved() throws Exception {
         String header =
                 "POST http://example.com/ HTTP/1.1\r\n"
                         + "Host: example.com\r\n"
@@ -143,9 +143,95 @@ class PrettifyHttpPanelViewTest {
         SwingUtilities.invokeAndWait(() -> view.setEditable(true));
         waitUntil(() -> area.getDocument() != readOnlyDocument);
 
+        // Merely opening the editable view (or a later refresh of it) must not touch the message.
+        assertTrue(
+                message.getRequestHeader().getHeaderValues("Content-Type").isEmpty(),
+                "opening the editable view must not write a header: "
+                        + message.getRequestHeader());
+
+        // The edit-and-save flow is what fills the header in, from the body being sent.
+        SwingUtilities.invokeAndWait(
+                () -> {
+                    String text = area.getText();
+                    // The first "1" in the All view is the HTTP version; target the body value.
+                    area.setCaretPosition(text.indexOf('1', text.indexOf("\"a\"")) + 1);
+                    area.replaceSelection("9");
+                    view.save();
+                });
         assertEquals(
                 List.of("application/json"),
                 message.getRequestHeader().getHeaderValues("Content-Type"));
+        assertTrue(
+                message.getRequestBody().toString().startsWith("{\"a\":19"),
+                "the saved body: " + message.getRequestBody());
+    }
+
+    @Test
+    void theContentTypeToggleKeepsTheHeaderWhenSwitchedOff() throws Exception {
+        String header =
+                "POST http://example.com/ HTTP/1.1\r\n"
+                        + "Host: example.com\r\n"
+                        + "X-Test: one\r\n"
+                        + "\r\n";
+        HttpMessage message = new HttpMessage(new HttpRequestHeader(header));
+        message.setRequestBody("{\"a\":1}");
+        RequestStringHttpPanelViewModel model = new RequestStringHttpPanelViewModel();
+        model.setMessage(message);
+
+        PrettifyHttpPanelView view =
+                new PrettifyHttpPanelView(
+                        "test", "test", null, PrettifyHttpPanelView.Target.REQUEST_ALL, model);
+        PrettifyTextArea area = textAreaOf(view);
+        waitUntil(() -> !area.getText().isEmpty());
+        Document readOnlyDocument = area.getDocument();
+        SwingUtilities.invokeAndWait(() -> view.setEditable(true));
+        waitUntil(() -> area.getDocument() != readOnlyDocument);
+
+        // The toggle starts on, and it is offered while the view is an editable request view.
+        boolean[] on = new boolean[1];
+        boolean[] applicable = new boolean[1];
+        SwingUtilities.invokeAndWait(
+                () -> {
+                    on[0] = area.contentTypeToggle() != null && area.contentTypeToggle().isOn();
+                    applicable[0] =
+                            area.contentTypeToggle() != null && area.contentTypeToggle().isApplicable();
+                });
+        assertTrue(on[0] && applicable[0], "the filler-toggle paperwork: " + on[0] + " " + applicable[0]);
+
+        // Toggled off, the save keeps the request exactly as it was made: no Content-Type appears,
+        // while the edited body is still persisted.
+        SwingUtilities.invokeAndWait(() -> area.contentTypeToggle().setOn(false));
+        SwingUtilities.invokeAndWait(
+                () -> {
+                    String text = area.getText();
+                    area.setCaretPosition(text.indexOf('1', text.indexOf("\"a\"")) + 1);
+                    area.replaceSelection("9");
+                    view.save();
+                });
+        assertTrue(
+                message.getRequestHeader().getHeaderValues("Content-Type").isEmpty(),
+                "the filler must stay off: " + message.getRequestHeader());
+        assertTrue(
+                message.getRequestBody().toString().startsWith("{\"a\":19"),
+                "the saved body: " + message.getRequestBody());
+
+        // Toggled on again, the next save fills the header in from the body being sent.
+        SwingUtilities.invokeAndWait(() -> area.contentTypeToggle().setOn(true));
+        SwingUtilities.invokeAndWait(
+                () -> {
+                    String text = area.getText();
+                    int pos = text.indexOf('9', text.indexOf("\"a\""));
+                    area.setCaretPosition(pos);
+                    area.moveCaretPosition(pos + 1);
+                    area.replaceSelection("8");
+                    view.save();
+                });
+        assertEquals(
+                List.of("application/json"),
+                message.getRequestHeader().getHeaderValues("Content-Type"));
+        assertTrue(
+                message.getRequestBody().toString().startsWith("{\"a\":18"),
+                "the saved body: " + message.getRequestBody());
     }
 
     @Test

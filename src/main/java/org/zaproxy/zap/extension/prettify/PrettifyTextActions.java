@@ -26,13 +26,22 @@ final class PrettifyTextActions {
     private PrettifyTextActions() {}
 
     static synchronized void init() {
-        if (initialized || View.getSingleton() == null) {
+        // isInitialised, not the singleton: getSingleton lazily builds the whole ZAP UI (frame,
+        // panels) as a side effect, so it must not be touched when there is no view yet.
+        if (initialized || !View.isInitialised()) {
             return;
         }
         Vector<JMenuItem> popupList = View.getSingleton().getPopupList();
         if (popupList == null) {
             return;
         }
+        // Take anything a previous init left back out (an {@link #add} that threw midway leaves the
+        // items it had already built on record while {@code initialized} is still false), so a
+        // re-hook can never register an action twice.
+        for (JMenuItem item : REGISTERED) {
+            popupList.remove(item);
+        }
+        REGISTERED.clear();
         add(popupList, RTextArea.UNDO_ACTION, 19060);
         add(popupList, RTextArea.REDO_ACTION, 19040);
         add(popupList, RTextArea.CUT_ACTION, 17080);
@@ -40,6 +49,11 @@ final class PrettifyTextActions {
         add(popupList, RTextArea.PASTE_ACTION, 17040);
         add(popupList, RTextArea.DELETE_ACTION, 17020);
         add(popupList, RTextArea.SELECT_ALL_ACTION, 15050);
+        // The view's own options (the content-type toggle) as a sub-menu, so the item belongs to
+        // the same registration/removal lifecycle as the text actions.
+        PrettifyViewOptionsMenu optionsMenu = new PrettifyViewOptionsMenu();
+        popupList.add(optionsMenu);
+        REGISTERED.add(optionsMenu);
         initialized = true;
     }
 
@@ -50,7 +64,8 @@ final class PrettifyTextActions {
     }
 
     static synchronized void remove() {
-        View view = View.getSingleton();
+        // Same reason as in init(): before the view is created the singleton would build the UI.
+        View view = View.isInitialised() ? View.getSingleton() : null;
         Vector<JMenuItem> popupList = view == null ? null : view.getPopupList();
         if (popupList != null) {
             for (JMenuItem item : REGISTERED) {

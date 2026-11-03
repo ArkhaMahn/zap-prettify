@@ -154,6 +154,12 @@ public class PrettifyHttpPanelView
     /** Guards against re-entering {@link #dataChanged} while ZAP's body fix-up is applied. */
     private boolean adjustingBody;
 
+    /**
+     * Whether saving an edited message adds the Content-Type header the body implies (the toggle in
+     * the Pretty pop-up). On by default, like the documented behavior of the filler.
+     */
+    private boolean updateContentType = true;
+
     /** Whether a coalesced editable-gutter rebuild is already queued on the EDT. */
     private boolean editableNumberingPending;
 
@@ -243,6 +249,24 @@ public class PrettifyHttpPanelView
         this.mainPanel = new JPanel(new BorderLayout());
         this.textArea = new PrettifyTextArea(DisplayUtils.isDarkLookAndFeel());
         this.textArea.setPasteFormatter(this::formatPastedText);
+        this.textArea.setContentTypeToggle(
+                new PrettifyTextArea.ContentTypeToggle() {
+                    @Override
+                    public boolean isOn() {
+                        return updateContentType;
+                    }
+
+                    @Override
+                    public void setOn(boolean on) {
+                        updateContentType = on;
+                    }
+
+                    @Override
+                    public boolean isApplicable() {
+                        return editable
+                                && (target == Target.REQUEST_BODY || target == Target.REQUEST_ALL);
+                    }
+                });
         this.scrollPane = new RTextScrollPane(textArea, true);
         applyGutterTheme();
         textArea.addThemeListener(this::applyGutterTheme);
@@ -974,7 +998,7 @@ public class PrettifyHttpPanelView
             // right edge.
             FontMetrics metrics = textArea.getFontMetrics(font);
             FontRenderContext frc = new FontRenderContext(null, true, true);
-            double monospaceAdvance = monospaceAdvance(font, frc, metrics);
+            double monospaceAdvance = monospaceAdvance(font, frc);
             // A tab advances to the next tab stop, i.e. at most TAB_SIZE columns; upper-bound it so
             // a tab can never make a row overflow.
             double tabWidth =
@@ -1083,14 +1107,13 @@ public class PrettifyHttpPanelView
     /**
      * The font's exact per-character advance when it is monospaced, or -1 otherwise. RSTA rounds the
      * width of a whole token run, so this (rather than the rounded {@code charWidth}) is the width a
-     * row really paints.
+     * row really paints. The monospace test is the shared {@link PrettifyTextArea#isMonospaced} - the
+     * font selection, the text area's own advance and this table all accept the same fonts.
      */
-    private static double monospaceAdvance(Font font, FontRenderContext frc, FontMetrics metrics) {
-        int charWidth = metrics.charWidth('M');
-        if (metrics.charWidth('i') != charWidth || metrics.charWidth('W') != charWidth) {
-            return -1;
-        }
-        return font.createGlyphVector(frc, "M").getGlyphPosition(1).getX();
+    private static double monospaceAdvance(Font font, FontRenderContext frc) {
+        return PrettifyTextArea.isMonospaced(font)
+                ? font.createGlyphVector(frc, "M").getGlyphPosition(1).getX()
+                : -1;
     }
 
     private static double measuredWidth(
@@ -1270,7 +1293,9 @@ public class PrettifyHttpPanelView
         textArea.setMessageText(rawText);
         displaySource = edited;
         rememberBody();
-        // The body is in the message now, so the request can be given the content type it has.
+        // The body is in the message being saved now, so the request gets the content type it
+        // has. This is the only path that writes the header: showing or refreshing the editable
+        // view never rewrites the message.
         boolean headerChanged = setContentTypeIfMissing();
         if (headerChanged && target == Target.REQUEST_ALL) {
             // The All view shows the header block, so the added type has to be rendered. The
@@ -1330,10 +1355,9 @@ public class PrettifyHttpPanelView
             sessionStyle = null;
         }
         if (model.getMessage() != null) {
-            // The request may carry a body that says what it is; the header is filled in before
-            // the view is rendered, so that it is shown with the content type. The rendering mode
-            // also depends on whether the view is editable.
-            setContentTypeIfMissing();
+            // The rendering mode depends on whether the view is editable. The message itself is
+            // not touched here: a Content-Type the body implies is only written when the message
+            // is saved (see save()), so opening or refreshing an editable view never edits it.
             update();
         }
     }
@@ -1358,12 +1382,14 @@ public class PrettifyHttpPanelView
     @Override
     public void loadConfiguration(FileConfiguration fileConfiguration) {
         textArea.loadConfiguration(configurationKey, fileConfiguration);
+        updateContentType = fileConfiguration.getBoolean(configurationKey + "updatecontenttype", true);
         applyWrapPolicy();
     }
 
     @Override
     public void saveConfiguration(FileConfiguration fileConfiguration) {
         textArea.saveConfiguration(configurationKey, fileConfiguration);
+        fileConfiguration.setProperty(configurationKey + "updatecontenttype", updateContentType);
     }
 
     @Override
@@ -1372,7 +1398,6 @@ public class PrettifyHttpPanelView
             return;
         }
         undoZapBodyChange();
-        setContentTypeIfMissing();
         String data = model.getData();
         if (data == null) {
             data = "";
@@ -1399,14 +1424,20 @@ public class PrettifyHttpPanelView
     }
 
     /**
-     * Gives a request that carries a body the content type it has, when it does not have one: the
-     * type is taken from the body, so that a request sent with a JSON body says that it is JSON.
-     * Only a request that is being edited is touched.
+     * Gives a request being saved that carries a body the content type it has: the type is taken
+     * from the body, so that a request sent with a JSON body says that it is JSON. The header is
+     * only ever written on this save path - merely opening or refreshing an editable view never
+     * mutates the message.
      *
      * @return whether the request header was changed
      */
     private boolean setContentTypeIfMissing() {
         if (!editable) {
+            return false;
+        }
+        if (!updateContentType) {
+            // The view's pop-up toggle turns the filler off: the message keeps exactly the headers
+            // it has, with no Content-Type added on save.
             return false;
         }
         if (target != Target.REQUEST_BODY && target != Target.REQUEST_ALL) {

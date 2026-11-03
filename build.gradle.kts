@@ -7,7 +7,7 @@ plugins {
 
 group = "prettify"
 version = "1.0.0"
-description = "Prettify - syntax-highlighted view of HTTP requests and responses"
+description = "Prettify - syntax-highlighted view of HTTP messages"
 
 repositories {
     mavenCentral()
@@ -26,7 +26,7 @@ dependencies {
 
 zapAddOn {
     addOnName.set("Prettify")
-    addOnStatus.set(AddOnStatus.BETA)
+    addOnStatus.set(AddOnStatus.ALPHA)
     zapVersion.set("2.17.0")
 
     manifest {
