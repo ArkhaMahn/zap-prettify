@@ -16,6 +16,7 @@ import java.util.function.BooleanSupplier;
 import javax.swing.ScrollPaneConstants;
 import javax.swing.SwingUtilities;
 import javax.swing.text.Document;
+import org.fife.ui.rtextarea.LineNumberFormatter;
 import org.fife.ui.rtextarea.RTextScrollPane;
 import org.fife.ui.rsyntaxtextarea.SyntaxScheme;
 import org.fife.ui.rsyntaxtextarea.Token;
@@ -340,6 +341,105 @@ class PrettifyHttpPanelViewTest {
                 ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER,
                 scrollPane.getHorizontalScrollBarPolicy(),
                 "wrap on again");
+    }
+
+    /**
+     * Re-rendering the message an editor already shows (a resize echo, an option re-flip, ZAP's
+     * repeated notifications) is very common. The render runs, but the artifacts of the previous
+     * one are the artifacts it needs: the prepared document is reused, and the already-laid-out
+     * document stays installed. A fresh document would pay for the whole layout again on the EDT -
+     * the exact swap this view avoids for the tiles it does not need to repeat.
+     */
+    @Test
+    void aRepeatedRenderOfTheSameMessageKeepsTheInstalledDocument() throws Exception {
+        HttpMessage message = new HttpMessage(new HttpRequestHeader(HEADER));
+        message.setRequestBody("{\"a\":1}");
+        RequestStringHttpPanelViewModel model = new RequestStringHttpPanelViewModel();
+        model.setMessage(message);
+
+        PrettifyHttpPanelView view =
+                new PrettifyHttpPanelView(
+                        "test",
+                        "test",
+                        "text/plain",
+                        PrettifyHttpPanelView.Target.REQUEST_ALL,
+                        model);
+        PrettifyTextArea area = textAreaOf(view);
+        waitUntil(() -> !area.getText().isEmpty());
+        Object installedDocument = documentOf(area);
+        LineNumberFormatter installedFormatter = formatterOf(view);
+
+        // The echo notification re-renders. A repeated render can be invisible (the same
+        // document, the same text), so its one visible heartbeat is the gutter formatter that
+        // every install re-creates: the document identity is asserted against that heartbeat.
+        SwingUtilities.invokeAndWait(() -> view.dataChanged(null));
+        waitUntil(
+                () -> formatterOf(view) != installedFormatter && documentOf(area) == installedDocument,
+                "the repeated render to run without swapping the document in again");
+    }
+
+    /**
+     * A resize is many width steps, and each one queues a whole re-split of the message. The
+     * steps are coalesced: at a change smaller than one character nothing is scheduled, and a
+     * real change re-splits only against the width that settled, once.
+     */
+    @Test
+    void aWidthChangeSettlesBeforeItReSplitsAndSwapsTheDocument() throws Exception {
+        HttpMessage message = new HttpMessage(new HttpRequestHeader(HEADER));
+        message.setRequestBody("x".repeat(500));
+        RequestStringHttpPanelViewModel model = new RequestStringHttpPanelViewModel();
+
+        model.setMessage(message);
+        PrettifyHttpPanelView view =
+                new PrettifyHttpPanelView(
+                        "test",
+                        "test",
+                        "text/plain",
+                        PrettifyHttpPanelView.Target.REQUEST_ALL,
+                        model);
+        PrettifyTextArea area = textAreaOf(view);
+        waitUntil(() -> !area.getText().isEmpty());
+        Object unwrappedDocument = documentOf(area);
+        LineNumberFormatter unwrappedFormatter = formatterOf(view);
+
+        // A real width change schedules the settle timer; the viewport gets the width that
+        // settled, and the re-split runs once for it. The post-install width correction would
+        // re-split directly (and beat the settle beat), so it is put to rest as well: the timer
+        // is then the only thing that can produce the re-split this waits for. The split of the
+        // settled width wraps the long body row, so the swapped-in document is a new one.
+        SwingUtilities.invokeAndWait(
+                () -> {
+                    stopPendingSettle(view);
+                    stopInstallCheck(view);
+                    area.setSize(900, 480);
+                    resplitIfWidthChanged(view);
+                });
+        assertTrue(settleTimerScheduled(view), "a width change schedules the settled re-split");
+        waitUntil(
+                () ->
+                        formatterOf(view) != unwrappedFormatter
+                                && documentOf(area) != unwrappedDocument,
+                "the settled width to be re-split with a new document");
+
+        // Width below one character: the same width step cannot move a break, so nothing is
+        // scheduled and no render ever runs. The document is left exactly as it was. A settle
+        // timer armed by the earlier width step (the re-split can also have been produced by
+        // the post-install width correction directly) is put to rest, so the no-op step's own
+        // scheduling decision is read against a clean slate.
+        Object settledDocument = documentOf(area);
+        long settledGeneration = generationOf(view);
+        SwingUtilities.invokeAndWait(
+                () -> {
+                    stopPendingSettle(view);
+                    resplitIfWidthChanged(view);
+                    assertFalse(settleTimerScheduled(view), "same width step, nothing scheduled");
+                });
+        for (int i = 0; i < 20; i++) {
+            SwingUtilities.invokeAndWait(() -> {});
+            Thread.sleep(20);
+        }
+        assertEquals(settledDocument, documentOf(area), "no re-split for the settled width");
+        assertEquals(settledGeneration, generationOf(view), "no render for the settled width");
     }
 
     @Test
@@ -1154,6 +1254,10 @@ class PrettifyHttpPanelViewTest {
     }
 
     private static void waitUntil(BooleanSupplier condition) throws Exception {
+        waitUntil(condition, "timed out waiting for the view to render");
+    }
+
+    private static void waitUntil(BooleanSupplier condition, String message) throws Exception {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         while (true) {
             boolean[] ready = new boolean[1];
@@ -1162,9 +1266,101 @@ class PrettifyHttpPanelViewTest {
                 return;
             }
             if (System.nanoTime() > deadline) {
-                fail("timed out waiting for the view to render");
+                fail(message);
             }
             Thread.sleep(10);
+        }
+    }
+
+    /**
+     * The gutter formatter read on the EDT. Every install re-creates it, so its identity is the
+     * observable heartbeat of an install - also the heartbeat of a reuse render whose document
+     * (and text) stay the same.
+     */
+    private static LineNumberFormatter formatterOf(PrettifyHttpPanelView view) {
+        RTextScrollPane scrollPane;
+        try {
+            scrollPane = scrollPaneOf(view);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+        if (SwingUtilities.isEventDispatchThread()) {
+            return scrollPane.getGutter().getLineNumberFormatter();
+        }
+        LineNumberFormatter[] formatter = new LineNumberFormatter[1];
+        try {
+            SwingUtilities.invokeAndWait(
+                    () -> formatter[0] = scrollPane.getGutter().getLineNumberFormatter());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            throw new IllegalStateException(e.getCause());
+        }
+        return formatter[0];
+    }
+
+    /**
+     * Drives the resize entry point directly: a test component has no peer, and without peer
+     * there are no layout notifications that would call it.
+     */
+    private static void resplitIfWidthChanged(PrettifyHttpPanelView view) {
+        try {
+            Method method = PrettifyHttpPanelView.class.getDeclaredMethod("resplitIfWidthChanged");
+            method.setAccessible(true);
+            method.invoke(view);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /** Whether the resize path's settle timer is armed. */
+    private static boolean settleTimerScheduled(PrettifyHttpPanelView view) {
+        try {
+            Field timer = PrettifyHttpPanelView.class.getDeclaredField("resplitSettle");
+            timer.setAccessible(true);
+            javax.swing.Timer settle = (javax.swing.Timer) timer.get(view);
+            return settle != null && settle.isRunning();
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /** Puts a settle timer armed by an earlier width step to rest. */
+    private static void stopPendingSettle(PrettifyHttpPanelView view) {
+        try {
+            Field timer = PrettifyHttpPanelView.class.getDeclaredField("resplitSettle");
+            timer.setAccessible(true);
+            javax.swing.Timer settle = (javax.swing.Timer) timer.get(view);
+            if (settle != null) {
+                settle.stop();
+            }
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /** Puts the post-install width correction of an earlier install to rest. */
+    private static void stopInstallCheck(PrettifyHttpPanelView view) {
+        try {
+            Field timer = PrettifyHttpPanelView.class.getDeclaredField("installCheck");
+            timer.setAccessible(true);
+            javax.swing.Timer check = (javax.swing.Timer) timer.get(view);
+            if (check != null) {
+                check.stop();
+            }
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /** The render generation read by reflection: a re-render is one generation more. */
+    private static long generationOf(PrettifyHttpPanelView view) {
+        try {
+            Field generation = PrettifyHttpPanelView.class.getDeclaredField("generation");
+            generation.setAccessible(true);
+            return generation.getLong(view);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(e);
         }
     }
 

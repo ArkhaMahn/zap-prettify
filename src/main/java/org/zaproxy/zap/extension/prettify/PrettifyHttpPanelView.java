@@ -169,11 +169,56 @@ public class PrettifyHttpPanelView
     /** Whether tokens are coloured by the theme (the toggle in the Pretty pop-up). */
     private boolean highlightEnabled = true;
 
+    /**
+     * The last projection result ({@link #projection}): a repeated render of the same message
+     * (resizes, option flips, ZAP's echo notifications) is very common in practice, and the
+     * formatter would be applied to the same bytes over and over. Keyed on every input that can
+     * change the result; cross-thread reads are safe because equal keys always yield one result.
+     */
+    private String projectionRaw;
+
+    private String projectionType = "";
+
+    private boolean projectionStripped;
+
+    private boolean projectionFormatting;
+
+    private String projectionDisplay;
+
     /** Whether a coalesced editable-gutter rebuild is already queued on the EDT. */
     private boolean editableNumberingPending;
 
     /** One-shot check that re-validates the wrap width after a new document has been laid out. */
     private Timer installCheck;
+
+    /**
+     * The artifacts of the last read-only split, keyed on everything a re-split depends on
+     * (display text, style, viewport width, wrap mode). A re-render whose key matches reuses the
+     * split, its document and its line numbers, so it never touches the formatter, the splitter,
+     * the document build or a whole new layout on the EDT.
+     */
+    private Timer resplitSettle;
+
+    /** How long the viewport width is given to settle before a re-split is queued. */
+    private static final int RESPLIT_SETTLE_MS = 120;
+
+    private String splitDisplay;
+
+    private String splitStyle;
+
+    private int splitWidthPx = -1;
+
+    private boolean splitWrapped;
+
+    private DisplayTextSplitter.Split cachedSplit;
+
+    private RSyntaxDocument splitDocument;
+
+    private String splitNumbering;
+
+    private int[] splitLineNumbers;
+
+    private int splitMaxLineNumber = 1;
 
     /**
      * The request body the view last showed. ZAP moves the body into the query string when the
@@ -467,30 +512,59 @@ public class PrettifyHttpPanelView
             return;
         }
         String style = styleFor(contentType, display);
-        DisplayTextSplitter.Split split;
+        // Every state this read-only split depends on, all together: a re-render whose key
+        // matches re-uses the artifacts of the last one (split, document, line numbers) instead
+        // of paying for them again - the common repeat case (resizes, option flips, ZAP's echo
+        // notifications) then never reformats, re-splits, rebuilds the document or re-lays it
+        // out. Editable re-renders keep their session document anyway.
+        boolean reuseSplit =
+                !editable
+                        && cachedSplit != null
+                        && widthPx == splitWidthPx
+                        && textArea.isWordWrapConfigured() == splitWrapped
+                        && style.equals(splitStyle)
+                        && display.equals(splitDisplay);
+        DisplayTextSplitter.Split usedSplit;
         if (editable) {
-            split = new DisplayTextSplitter.Split(display, display, new int[0]);
+            usedSplit = new DisplayTextSplitter.Split(display, display, new int[0]);
+        } else if (reuseSplit) {
+            usedSplit = cachedSplit;
         } else if (textArea.isWordWrapConfigured()) {
-            split = DisplayTextSplitter.split(display, style, widthPx, widths);
+            usedSplit = DisplayTextSplitter.split(display, style, widthPx, widths);
         } else {
             // Wrap off, read-only: the received rows are kept, so the viewport scrolls past long
             // rows instead of the text being reflowed to fit it.
-            split = DisplayTextSplitter.split(display);
+            usedSplit = DisplayTextSplitter.split(display);
+        }
+        if (!editable && !reuseSplit) {
+            cachedSplit = usedSplit;
+            splitDisplay = display;
+            splitStyle = style;
+            splitWidthPx = widthPx;
+            splitWrapped = textArea.isWordWrapConfigured();
         }
         if (gen != generation) {
             return;
         }
         // An editable view numbers its rows from the text as it is typed (see
         // updateEditableNumbering), so it does not need this full walk.
-        int[] lineNumbers =
-                editable ? null : LineNumbers.forDisplay(numbering, split.displayText());
+        int[] lineNumbers = null;
         int maxLineNumber = 1;
-        if (lineNumbers != null) {
+        if (editable) {
+            // The rows are numbered as they are typed (see updateEditableNumbering).
+        } else if (reuseSplit && numbering.equals(splitNumbering)) {
+            lineNumbers = splitLineNumbers;
+            maxLineNumber = splitMaxLineNumber;
+        } else {
+            lineNumbers = LineNumbers.forDisplay(numbering, usedSplit.displayText());
             for (int lineNumber : lineNumbers) {
                 if (lineNumber > maxLineNumber) {
                     maxLineNumber = lineNumber;
                 }
             }
+            splitNumbering = numbering;
+            splitLineNumbers = lineNumbers;
+            splitMaxLineNumber = maxLineNumber;
         }
         if (gen != generation) {
             return;
@@ -510,25 +584,45 @@ public class PrettifyHttpPanelView
             // text views, a Ctrl+Z then takes the fresh view back to the empty text area.
             document =
                     ChunkedTextLoader.buildDocument(
-                            "", style, split, () -> gen != generation, editable);
+                            "", style, usedSplit, () -> gen != generation, editable);
             if (document == null) {
                 return;
             }
         } else {
-            document =
-                    ChunkedTextLoader.buildDocument(
-                            split.displayText(), style, split, () -> gen != generation, editable);
-            if (document == null) {
-                return;
+            if (reuseSplit && splitDocument != null) {
+                // The same split was already materialised once: its document is reusable as it
+                // is, so the re-render never pays for the build (or the EDT layout swap) again.
+                document = splitDocument;
+            } else {
+                document =
+                        ChunkedTextLoader.buildDocument(
+                                usedSplit.displayText(),
+                                style,
+                                usedSplit,
+                                () -> gen != generation,
+                                editable);
+                if (document == null) {
+                    return;
+                }
+                splitDocument = document;
             }
         }
         final int installedLineCount = maxLineNumber;
+        final DisplayTextSplitter.Split installedSplit = usedSplit;
+        final int[] installedLineNumbers = lineNumbers;
+        final RSyntaxDocument installedDocument = document;
         SwingUtilities.invokeLater(
                 () -> {
                     if (gen != generation) {
                         return;
                     }
-                    install(raw, split, lineNumbers, installedLineCount, document, style);
+                    install(
+                            raw,
+                            installedSplit,
+                            installedLineNumbers,
+                            installedLineCount,
+                            installedDocument,
+                            style);
                 });
     }
 
@@ -538,11 +632,25 @@ public class PrettifyHttpPanelView
      * exact. There is no size cutoff: formatting runs off the EDT.
      */
     private String projection(String raw, String contentType, boolean stripTrailing) {
+        boolean cacheHit =
+                projectionRaw != null
+                        && raw.equals(projectionRaw)
+                        && (contentType == null ? projectionType.isEmpty() : contentType.equals(projectionType))
+                        && stripTrailing == projectionStripped
+                        && formatEnabled == projectionFormatting;
+        if (cacheHit) {
+            return projectionDisplay;
+        }
         String text = format(raw, contentType, stripTrailing);
         if (!TextAlignment.sameNonWhitespace(raw, text)) {
             LOGGER.debug("Formatter changed non-whitespace; showing the raw message instead.");
             text = stripTrailing ? stripTrailingNewlines(raw) : raw;
         }
+        projectionRaw = raw;
+        projectionType = contentType == null ? "" : contentType;
+        projectionStripped = stripTrailing;
+        projectionFormatting = formatEnabled;
+        projectionDisplay = text;
         return text;
     }
 
@@ -627,9 +735,19 @@ public class PrettifyHttpPanelView
                 fillSession();
             }
         } else {
-            ChunkedTextLoader.installDocument(
-                    textArea, document, () -> textArea.discardAllEdits());
-            trackUserEdits();
+            if (document == textArea.getDocument()) {
+                // The exact document is already shown (the re-render reused it): swapping it in
+                // again would discard and rebuild a whole, already correct layout on the EDT.
+                // Only the scroll/caret restore and the (identical) details below are needed.
+                if (!editable && sessionDocument != null) {
+                    sessionDocument = null;
+                    sessionStyle = null;
+                }
+            } else {
+                ChunkedTextLoader.installDocument(
+                        textArea, document, () -> textArea.discardAllEdits());
+                trackUserEdits();
+            }
             if (editable) {
                 // A new editable document is the start (or the epoch) of an edit session: the
                 // document was built empty and the message is filled in now, which is not part
@@ -1227,6 +1345,27 @@ public class PrettifyHttpPanelView
             return;
         }
         widthCorrections = 0;
+        // Splitting a large message re-lays out its whole document, so the split is coalesced:
+        // a drag fires many width steps, and this runs the one the width settles on (within a
+        // beat, so it still feels immediate) instead of one per step.
+        if (resplitSettle == null) {
+            resplitSettle = new Timer(RESPLIT_SETTLE_MS, e -> settleResplit());
+            resplitSettle.setRepeats(false);
+        }
+        resplitSettle.restart();
+    }
+
+    /** Re-checks the width once it has settled, and re-splits only when it really moved. */
+    private void settleResplit() {
+        if (editable || changed || !textArea.isWordWrapConfigured()) {
+            return;
+        }
+        int widthPx = currentWrapWidthPx();
+        if (widthPx <= 0
+                || (wrappedWidthPx > 0
+                        && Math.abs(widthPx - wrappedWidthPx) < charAdvance())) {
+            return;
+        }
         resplit();
     }
 
