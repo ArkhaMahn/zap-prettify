@@ -16,7 +16,8 @@ Prettify adds syntax-highlighted "Pretty" views to the OWASP ZAP HTTP request an
 - **Search integration** - Works with ZAP's search functionality, with offset mapping through the formatted projection back to the raw message offsets.
 - **ZAP highlights and text actions** - Participates in ZAP's `HighlighterManager`, so user-defined highlights are painted like in the core views, and offers the standard undo/redo/cut/copy/paste/delete/select-all actions in the message popup menu.
 - **Persisted view settings** - Word wrap, line numbers, anti-aliasing, current-line highlighting, whitespace/newline markers, and related editor options are saved per view and restored on restart.
-- **Smart body handling** - Handles ZAP's behavior of moving request bodies when changing HTTP methods, preserves form-encoded bodies when editing to avoid breaking structure, and auto-detects and sets a Content-Type header when a message is saved with a body whose type it names. The "Pretty view" pop-up menu of an editable request has a toggle to switch that filler off per view.
+- **Smart body handling** - Handles ZAP's behavior of moving request bodies when changing HTTP methods, preserves form-encoded bodies when editing to avoid breaking structure, and auto-detects and sets a Content-Type header when a message is saved with a body whose type it names.
+- **Per-view options** - Right-clicking any Pretty view offers a "Pretty view" submenu with checkable options for that view alone, each persisted per view and restored on restart: whether saving adds the Content-Type header the body implies (editable request views), word wrap (off, an editable view scrolls horizontally and a read-only view keeps the received rows instead of pre-splitting them), pretty formatting (off, the message is shown as received and pastes are inserted exactly as pasted), and syntax highlighting (off, every token is drawn in the plain text colour).
 
 ## Requirements
 

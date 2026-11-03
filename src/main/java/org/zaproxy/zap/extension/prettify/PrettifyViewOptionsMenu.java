@@ -1,42 +1,62 @@
 package org.zaproxy.zap.extension.prettify;
 
 import java.awt.Component;
+import java.util.EnumMap;
+import java.util.Map;
+import javax.swing.JCheckBoxMenuItem;
 import org.parosproxy.paros.Constant;
 import org.zaproxy.zap.extension.ExtensionPopupMenu;
 import org.zaproxy.zap.view.messagecontainer.MessageContainer;
 
 /**
- * The "Pretty view" sub-menu of the message popup, holding the Prettify view's own per-view options.
+ * The &quot;Pretty view&quot; sub-menu of the message popup, holding the Prettify view's own
+ * per-view options: the Content-Type filler, word wrap, pretty formatting and syntax highlighting.
  *
- * <p>The menu is offered only for {@link PrettifyTextArea}s; everywhere else it is hidden, and the
- * view whose menu item was toggled keeps the state through {@link PrettifyTextArea.ContentTypeToggle}
- * (the view persists it with its own editor settings). The single checkable item for now governs
- * whether saving an edited message adds the Content-Type header the body implies; more options live
- * in the style/adapted View menu of the core syntax view, so the extra level of indirection matches
- * the convention the panel's own checkable options follow.
+ * <p>The menu is offered only for {@link PrettifyTextArea}s; everywhere else it is hidden. The view
+ * keeps the state itself (and persists it with its own editor settings) through
+ * {@link PrettifyTextArea.Options}; every show re-derives the check state from the view being
+ * invoked, so view instances never share a checkbox, and an entry is only offered where its option
+ * applies (for example, the Content-Type filler only exists for editable request views).
  */
 public class PrettifyViewOptionsMenu extends ExtensionPopupMenu {
 
     private static final long serialVersionUID = 1L;
 
-    private final javax.swing.JCheckBoxMenuItem updateContentType =
-            new javax.swing.JCheckBoxMenuItem(
-                    Constant.messages.getString("prettify.popup.updatetype"));
+    private final Map<PrettifyTextArea.Option, JCheckBoxMenuItem> items =
+            new EnumMap<>(PrettifyTextArea.Option.class);
 
-    /** The text area whose view the toggle is about (set when the menu becomes visible). */
+    /** The text area whose view the menu is about (set again on every show). */
     private PrettifyTextArea toggling;
 
     public PrettifyViewOptionsMenu() {
         super(Constant.messages.getString("prettify.popup.menu"));
-        updateContentType.addActionListener(
-                event -> {
-                    PrettifyTextArea.ContentTypeToggle toggle =
-                            toggling == null ? null : toggling.contentTypeToggle();
-                    if (toggle != null) {
-                        toggle.setOn(updateContentType.isSelected());
-                    }
-                });
-        add(updateContentType);
+        for (PrettifyTextArea.Option option : PrettifyTextArea.Option.values()) {
+            JCheckBoxMenuItem item = new JCheckBoxMenuItem(label(option));
+            item.addActionListener(
+                    event -> {
+                        PrettifyTextArea.Options options =
+                                toggling == null ? null : toggling.options();
+                        if (options != null) {
+                            options.setOn(option, item.isSelected());
+                        }
+                    });
+            items.put(option, item);
+            add(item);
+        }
+    }
+
+    private static String label(PrettifyTextArea.Option option) {
+        switch (option) {
+            case UPDATE_CONTENT_TYPE:
+                return Constant.messages.getString("prettify.popup.updatetype");
+            case WRAP:
+                return Constant.messages.getString("prettify.popup.wrap");
+            case FORMAT:
+                return Constant.messages.getString("prettify.popup.format");
+            case SYNTAX_HIGHLIGHT:
+                return Constant.messages.getString("prettify.popup.highlight");
+        }
+        return option.name();
     }
 
     @Override
@@ -45,14 +65,22 @@ public class PrettifyViewOptionsMenu extends ExtensionPopupMenu {
             return false;
         }
         PrettifyTextArea area = (PrettifyTextArea) invoker;
-        PrettifyTextArea.ContentTypeToggle toggle = area.contentTypeToggle();
-        if (toggle == null || !toggle.isApplicable()) {
-            // wherever the fill itself would never run, the menu is not offered either
+        PrettifyTextArea.Options options = area.options();
+        if (options == null) {
             return false;
         }
+        boolean any = false;
+        for (Map.Entry<PrettifyTextArea.Option, JCheckBoxMenuItem> entry : items.entrySet()) {
+            PrettifyTextArea.Option option = entry.getKey();
+            boolean shown = options.isApplicable(option);
+            entry.getValue().setVisible(shown);
+            if (shown) {
+                entry.getValue().setSelected(options.isOn(option));
+                any = true;
+            }
+        }
         this.toggling = area;
-        updateContentType.setSelected(toggle.isOn());
-        return true;
+        return any;
     }
 
     @Override

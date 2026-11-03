@@ -15,6 +15,24 @@ public class PrettifySyntaxScheme extends SyntaxScheme {
 
     private final Style[] styles;
 
+    private PrettifySyntaxScheme(Style[] styles) {
+        super(false);
+        this.styles = styles;
+    }
+
+    /**
+     * A scheme that draws every token type in the theme's plain text colour. It is the
+     * &quot;syntax highlighting off&quot; look: the tokens are still lexed and styled, just all in
+     * one colour, so the flag is a pure colour switch and never touches the rendering pipeline.
+     */
+    static SyntaxScheme plain(PrettifyTheme theme) {
+        Style[] styles = new Style[PrettifyTokenTypes.COUNT];
+        for (int i = 0; i < styles.length; i++) {
+            styles[i] = new Style(theme.getText());
+        }
+        return new PrettifySyntaxScheme(styles);
+    }
+
     public PrettifySyntaxScheme(PrettifyTheme theme) {
         super(false);
         this.styles = new Style[PrettifyTokenTypes.COUNT];

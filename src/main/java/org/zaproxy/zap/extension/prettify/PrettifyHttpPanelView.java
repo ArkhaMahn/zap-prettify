@@ -160,6 +160,15 @@ public class PrettifyHttpPanelView
      */
     private boolean updateContentType = true;
 
+    /**
+     * Whether the view pretty-prints the message (the toggle in the Pretty pop-up). Off, the
+     * message is shown as received and a paste is inserted exactly as pasted.
+     */
+    private boolean formatEnabled = true;
+
+    /** Whether tokens are coloured by the theme (the toggle in the Pretty pop-up). */
+    private boolean highlightEnabled = true;
+
     /** Whether a coalesced editable-gutter rebuild is already queued on the EDT. */
     private boolean editableNumberingPending;
 
@@ -249,20 +258,47 @@ public class PrettifyHttpPanelView
         this.mainPanel = new JPanel(new BorderLayout());
         this.textArea = new PrettifyTextArea(DisplayUtils.isDarkLookAndFeel());
         this.textArea.setPasteFormatter(this::formatPastedText);
-        this.textArea.setContentTypeToggle(
-                new PrettifyTextArea.ContentTypeToggle() {
+        this.textArea.setOptions(
+                new PrettifyTextArea.Options() {
                     @Override
-                    public boolean isOn() {
-                        return updateContentType;
+                    public boolean isOn(PrettifyTextArea.Option option) {
+                        switch (option) {
+                            case UPDATE_CONTENT_TYPE:
+                                return updateContentType;
+                            case WRAP:
+                                return textArea.isWordWrapConfigured();
+                            case FORMAT:
+                                return formatEnabled;
+                            case SYNTAX_HIGHLIGHT:
+                                return highlightEnabled;
+                        }
+                        return true;
                     }
 
                     @Override
-                    public void setOn(boolean on) {
-                        updateContentType = on;
+                    public void setOn(PrettifyTextArea.Option option, boolean on) {
+                        switch (option) {
+                            case UPDATE_CONTENT_TYPE:
+                                updateContentType = on;
+                                return;
+                            case WRAP:
+                                setWrapEnabled(on);
+                                return;
+                            case FORMAT:
+                                setFormatEnabled(on);
+                                return;
+                            case SYNTAX_HIGHLIGHT:
+                                setHighlightEnabled(on);
+                                return;
+                        }
                     }
 
                     @Override
-                    public boolean isApplicable() {
+                    public boolean isApplicable(PrettifyTextArea.Option option) {
+                        if (option != PrettifyTextArea.Option.UPDATE_CONTENT_TYPE) {
+                            // Wrap, formatting and highlighting apply to every part of the message.
+                            return true;
+                        }
                         return editable
                                 && (target == Target.REQUEST_BODY || target == Target.REQUEST_ALL);
                     }
@@ -270,11 +306,7 @@ public class PrettifyHttpPanelView
         this.scrollPane = new RTextScrollPane(textArea, true);
         applyGutterTheme();
         textArea.addThemeListener(this::applyGutterTheme);
-        // The text is pre-wrapped to fit the viewport, so a horizontal scrollbar could never reveal
-        // anything: its thumb would always span the full track. Disable it so the wrap appears
-        // contained instead of showing a redundant bar.
-        this.scrollPane.setHorizontalScrollBarPolicy(
-                ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        applyWrapPolicy();
         this.mainPanel.add(scrollPane, BorderLayout.CENTER);
         textArea.setComponentPopupMenu(new CustomPopupMenu());
         textArea.addComponentListener(
@@ -323,6 +355,36 @@ public class PrettifyHttpPanelView
         pendingScrollValue = -1;
         widthCorrections = 0;
         updateInternal();
+    }
+
+    /**
+     * Applies the wrap decision to both rendering modes: the editor follows the setting while
+     * editable, a read-only view switches between the width pre-split and the raw rows (which is
+     * why a flip while read-only re-renders), and the scrollbar policy follows the wrap state.
+     */
+    private void setWrapEnabled(boolean wrap) {
+        textArea.setWordWrapConfigured(wrap);
+        applyWrapPolicy();
+        if (!editable && model.getMessage() != null) {
+            SwingUtilities.invokeLater(this::update);
+        }
+    }
+
+    /** Applies the formatting decision to the message being shown (a live re-render). */
+    private void setFormatEnabled(boolean format) {
+        if (formatEnabled == format) {
+            return;
+        }
+        formatEnabled = format;
+        if (model.getMessage() != null) {
+            SwingUtilities.invokeLater(this::update);
+        }
+    }
+
+    /** Forwards the highlighting decision to the text area, which repaints with a new scheme. */
+    private void setHighlightEnabled(boolean highlight) {
+        highlightEnabled = highlight;
+        textArea.setSyntaxHighlightingEnabled(highlight);
     }
 
     /** Re-renders the current message and restores the caret and scroll position afterwards. */
@@ -405,10 +467,16 @@ public class PrettifyHttpPanelView
             return;
         }
         String style = styleFor(contentType, display);
-        DisplayTextSplitter.Split split =
-                editable
-                        ? new DisplayTextSplitter.Split(display, display, new int[0])
-                        : DisplayTextSplitter.split(display, style, widthPx, widths);
+        DisplayTextSplitter.Split split;
+        if (editable) {
+            split = new DisplayTextSplitter.Split(display, display, new int[0]);
+        } else if (textArea.isWordWrapConfigured()) {
+            split = DisplayTextSplitter.split(display, style, widthPx, widths);
+        } else {
+            // Wrap off, read-only: the received rows are kept, so the viewport scrolls past long
+            // rows instead of the text being reflowed to fit it.
+            split = DisplayTextSplitter.split(display);
+        }
         if (gen != generation) {
             return;
         }
@@ -484,6 +552,10 @@ public class PrettifyHttpPanelView
      * type, or with a sniff of the pasted text when the content type is not decisive.
      */
     private String formatPastedText(String text) {
+        if (!formatEnabled) {
+            // The view shows the message as received; a paste is kept exactly as pasted.
+            return text;
+        }
         if (text == null || text.isEmpty() || isHeaderTarget()) {
             return text;
         }
@@ -507,6 +579,12 @@ public class PrettifyHttpPanelView
      * header-only views just drop the blank line that terminates the header block.
      */
     private String format(String text, String contentType, boolean stripTrailing) {
+        if (!formatEnabled) {
+            // The formatting toggle is off: show the received text. Only the dangling blank
+            // line of a header block is dropped (a whitespace-only change, so the display stays
+            // aligned with the received text and the gutter keeps the received line numbers).
+            return stripTrailing ? stripTrailingNewlines(text) : text;
+        }
         switch (target) {
             case REQUEST_ALL:
             case RESPONSE_ALL:
@@ -1136,8 +1214,9 @@ public class PrettifyHttpPanelView
      * supersedes an older one, so there is no need to wait for a resize to settle.
      */
     private void resplitIfWidthChanged() {
-        if (editable || changed) {
+        if (editable || changed || !textArea.isWordWrapConfigured()) {
             // The user is editing: re-splitting would replace the text they are working on.
+            // Without wrap there is no viewport width to conform to either.
             return;
         }
         int widthPx = currentWrapWidthPx();
@@ -1363,11 +1442,13 @@ public class PrettifyHttpPanelView
     }
 
     /**
-     * Keeps the horizontal scrollbar out of the way: pre-split rows fit the viewport, and an
-     * editable view wraps them. It is only useful when word wrap is turned off while editing.
+     * Keeps the horizontal scrollbar out of the way while the rows cannot exceed the viewport:
+     * a read-only view with wrap on is pre-split to fit it, an editing view with wrap on
+     * soft-wraps. When wrap is off, in either mode, a row can run past the viewport, so the
+     * scrollbar is needed.
      */
     private void applyWrapPolicy() {
-        boolean needed = editable && !textArea.getLineWrap();
+        boolean needed = !textArea.isWordWrapConfigured();
         scrollPane.setHorizontalScrollBarPolicy(
                 needed
                         ? ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED
@@ -1383,6 +1464,9 @@ public class PrettifyHttpPanelView
     public void loadConfiguration(FileConfiguration fileConfiguration) {
         textArea.loadConfiguration(configurationKey, fileConfiguration);
         updateContentType = fileConfiguration.getBoolean(configurationKey + "updatecontenttype", true);
+        formatEnabled = fileConfiguration.getBoolean(configurationKey + "format", true);
+        highlightEnabled = fileConfiguration.getBoolean(configurationKey + "highlight", true);
+        textArea.setSyntaxHighlightingEnabled(highlightEnabled);
         applyWrapPolicy();
     }
 
@@ -1390,6 +1474,8 @@ public class PrettifyHttpPanelView
     public void saveConfiguration(FileConfiguration fileConfiguration) {
         textArea.saveConfiguration(configurationKey, fileConfiguration);
         fileConfiguration.setProperty(configurationKey + "updatecontenttype", updateContentType);
+        fileConfiguration.setProperty(configurationKey + "format", formatEnabled);
+        fileConfiguration.setProperty(configurationKey + "highlight", highlightEnabled);
     }
 
     @Override

@@ -49,8 +49,8 @@ final class PrettifyTextActions {
         add(popupList, RTextArea.PASTE_ACTION, 17040);
         add(popupList, RTextArea.DELETE_ACTION, 17020);
         add(popupList, RTextArea.SELECT_ALL_ACTION, 15050);
-        // The view's own options (the content-type toggle) as a sub-menu, so the item belongs to
-        // the same registration/removal lifecycle as the text actions.
+        // The view's own options sub-menu (the four per-view toggles), so the item belongs to the
+        // same registration/removal lifecycle as the text actions.
         PrettifyViewOptionsMenu optionsMenu = new PrettifyViewOptionsMenu();
         popupList.add(optionsMenu);
         REGISTERED.add(optionsMenu);

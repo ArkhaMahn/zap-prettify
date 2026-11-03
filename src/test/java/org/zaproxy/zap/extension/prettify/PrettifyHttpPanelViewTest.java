@@ -2,23 +2,31 @@ package org.zaproxy.zap.extension.prettify;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
+import java.awt.Color;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
+import javax.swing.ScrollPaneConstants;
 import javax.swing.SwingUtilities;
 import javax.swing.text.Document;
+import org.fife.ui.rtextarea.RTextScrollPane;
+import org.fife.ui.rsyntaxtextarea.SyntaxScheme;
 import org.fife.ui.rsyntaxtextarea.Token;
+import org.fife.ui.rsyntaxtextarea.TokenTypes;
 import org.junit.jupiter.api.Test;
 import org.parosproxy.paros.network.HttpMessage;
 import org.parosproxy.paros.network.HttpRequestHeader;
 import org.zaproxy.zap.extension.httppanel.view.AbstractStringHttpPanelViewModel;
 import org.zaproxy.zap.extension.httppanel.view.impl.models.http.request.RequestBodyStringHttpPanelViewModel;
 import org.zaproxy.zap.extension.httppanel.view.impl.models.http.request.RequestStringHttpPanelViewModel;
+import org.zaproxy.zap.utils.ZapXmlConfiguration;
 
 class PrettifyHttpPanelViewTest {
 
@@ -192,15 +200,21 @@ class PrettifyHttpPanelViewTest {
         boolean[] applicable = new boolean[1];
         SwingUtilities.invokeAndWait(
                 () -> {
-                    on[0] = area.contentTypeToggle() != null && area.contentTypeToggle().isOn();
+                    PrettifyTextArea.Options options = area.options();
+                    on[0] =
+                            options != null
+                                    && options.isOn(PrettifyTextArea.Option.UPDATE_CONTENT_TYPE);
                     applicable[0] =
-                            area.contentTypeToggle() != null && area.contentTypeToggle().isApplicable();
+                            options != null
+                                    && options.isApplicable(
+                                            PrettifyTextArea.Option.UPDATE_CONTENT_TYPE);
                 });
         assertTrue(on[0] && applicable[0], "the filler-toggle paperwork: " + on[0] + " " + applicable[0]);
 
         // Toggled off, the save keeps the request exactly as it was made: no Content-Type appears,
         // while the edited body is still persisted.
-        SwingUtilities.invokeAndWait(() -> area.contentTypeToggle().setOn(false));
+        SwingUtilities.invokeAndWait(
+                () -> area.options().setOn(PrettifyTextArea.Option.UPDATE_CONTENT_TYPE, false));
         SwingUtilities.invokeAndWait(
                 () -> {
                     String text = area.getText();
@@ -216,7 +230,8 @@ class PrettifyHttpPanelViewTest {
                 "the saved body: " + message.getRequestBody());
 
         // Toggled on again, the next save fills the header in from the body being sent.
-        SwingUtilities.invokeAndWait(() -> area.contentTypeToggle().setOn(true));
+        SwingUtilities.invokeAndWait(
+                () -> area.options().setOn(PrettifyTextArea.Option.UPDATE_CONTENT_TYPE, true));
         SwingUtilities.invokeAndWait(
                 () -> {
                     String text = area.getText();
@@ -232,6 +247,185 @@ class PrettifyHttpPanelViewTest {
         assertTrue(
                 message.getRequestBody().toString().startsWith("{\"a\":18"),
                 "the saved body: " + message.getRequestBody());
+    }
+
+    @Test
+    void theFormatToggleShowsTheReceivedBodyAndSwitchesBackLive() throws Exception {
+        HttpMessage message = new HttpMessage(new HttpRequestHeader(HEADER));
+        message.setRequestBody("{\"a\":1,\"b\":2}");
+        BodyModel model = new BodyModel();
+        model.setMessage(message);
+
+        PrettifyHttpPanelView view =
+                new PrettifyHttpPanelView(
+                        "test", "test", null, PrettifyHttpPanelView.Target.REQUEST_BODY, model);
+        PrettifyTextArea area = textAreaOf(view);
+        waitUntil(() -> !area.getText().isEmpty());
+
+        // On by default: the body is pretty-printed.
+        assertTrue(textOf(area).contains("\n"), "received: [" + textOf(area) + "]");
+
+        // Off: the body is exactly the received bytes (no live edit is needed for the switch).
+        SwingUtilities.invokeAndWait(() -> area.options().setOn(PrettifyTextArea.Option.FORMAT, false));
+        waitUntil(() -> "{\"a\":1,\"b\":2}".equals(textOf(area)));
+
+        // On again: the pretty layout comes back before anything is edited or saved.
+        SwingUtilities.invokeAndWait(() -> area.options().setOn(PrettifyTextArea.Option.FORMAT, true));
+        waitUntil(() -> textOf(area).contains("\n"));
+    }
+
+    @Test
+    void pasteIsNotReformattedWhileTheFormatToggleIsOff() throws Exception {
+        HttpMessage message = new HttpMessage(new HttpRequestHeader(HEADER));
+        message.setRequestBody("{\"a\":1,\"b\":2}");
+        BodyModel model = new BodyModel();
+        model.setMessage(message);
+
+        PrettifyHttpPanelView view =
+                new PrettifyHttpPanelView(
+                        "test", "test", null, PrettifyHttpPanelView.Target.REQUEST_BODY, model);
+        PrettifyTextArea area = textAreaOf(view);
+        waitUntil(() -> !area.getText().isEmpty());
+        Method formatPastedText =
+                PrettifyHttpPanelView.class.getDeclaredMethod("formatPastedText", String.class);
+        formatPastedText.setAccessible(true);
+        String pasted = "{\"a\": 3,\"b\":  4}";
+
+        // Off: the paste is returned exactly as pasted. The view shows the raw body, so a
+        // paste must not silently reformat behind the user's back.
+        SwingUtilities.invokeAndWait(() -> area.options().setOn(PrettifyTextArea.Option.FORMAT, false));
+        waitUntil(() -> "{\"a\":1,\"b\":2}".equals(textOf(area)));
+        assertEquals(pasted, formatPastedText.invoke(view, pasted), "toggle off");
+
+        // On: the pasted body is reformatted again, like the paste path normally does.
+        SwingUtilities.invokeAndWait(() -> area.options().setOn(PrettifyTextArea.Option.FORMAT, true));
+        waitUntil(() -> textOf(area).contains("\n"));
+        assertNotEquals(pasted, formatPastedText.invoke(view, pasted), "toggle on");
+    }
+
+    @Test
+    void theWrapToggleKeepsTheReceivedRowsAndMovesTheHorizontalScrollbar() throws Exception {
+        HttpMessage message = new HttpMessage(new HttpRequestHeader(HEADER));
+        message.setRequestBody("{\"a\":1}");
+        RequestStringHttpPanelViewModel model = new RequestStringHttpPanelViewModel();
+        model.setMessage(message);
+
+        PrettifyHttpPanelView view =
+                new PrettifyHttpPanelView(
+                        "test", "test", null, PrettifyHttpPanelView.Target.REQUEST_ALL, model);
+        PrettifyTextArea area = textAreaOf(view);
+        waitUntil(() -> !area.getText().isEmpty());
+        RTextScrollPane scrollPane = scrollPaneOf(view);
+
+        // Wrap on (the default): a read-only view is pre-split to the viewport, the scrollbar
+        // would never reveal anything and stays out of the way.
+        assertEquals(
+                ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER,
+                scrollPane.getHorizontalScrollBarPolicy(),
+                "wrap on by default");
+
+        // Off: the received rows are kept (the display matches the received text up to the
+        // whitespace the pretty layout reworks) and the scrollbar appears for rows that can run
+        // past the viewport.
+        SwingUtilities.invokeAndWait(() -> area.options().setOn(PrettifyTextArea.Option.WRAP, false));
+        waitUntil(() -> TextAlignment.sameNonWhitespace(model.getData(), textOf(area)));
+        assertEquals(
+                ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED,
+                scrollPane.getHorizontalScrollBarPolicy(),
+                "wrap off");
+
+        // On again: the scrollbar goes back.
+        SwingUtilities.invokeAndWait(() -> area.options().setOn(PrettifyTextArea.Option.WRAP, true));
+        assertEquals(
+                ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER,
+                scrollPane.getHorizontalScrollBarPolicy(),
+                "wrap on again");
+    }
+
+    @Test
+    void theHighlightToggleDrawsEveryTokenInThePlainTextColour() throws Exception {
+        HttpMessage message = new HttpMessage(new HttpRequestHeader(HEADER));
+        message.setRequestBody("{\"a\":1}");
+        BodyModel model = new BodyModel();
+        model.setMessage(message);
+
+        PrettifyHttpPanelView view =
+                new PrettifyHttpPanelView(
+                        "test", "test", null, PrettifyHttpPanelView.Target.REQUEST_BODY, model);
+        PrettifyTextArea area = textAreaOf(view);
+        waitUntil(() -> !area.getText().isEmpty());
+
+        // On by default: string, number and identifier tokens wear their own colours (the plain
+        // colour is the theme's text colour, which is also the area's foreground).
+        Color text = area.getForeground();
+        SyntaxScheme scheme = schemeOf(area);
+        Color stringFg = scheme.getStyle(TokenTypes.LITERAL_STRING_DOUBLE_QUOTE).foreground;
+        Color numberFg = scheme.getStyle(TokenTypes.LITERAL_NUMBER_DECIMAL_INT).foreground;
+        assertNotEquals(text, stringFg, "the string literal colour");
+        assertNotEquals(text, numberFg, "the number literal colour");
+
+        // Off: every token is drawn in the plain text colour.
+        SwingUtilities.invokeAndWait(
+                () -> area.options().setOn(PrettifyTextArea.Option.SYNTAX_HIGHLIGHT, false));
+        scheme = schemeOf(area);
+        assertEquals(text, scheme.getStyle(TokenTypes.LITERAL_STRING_DOUBLE_QUOTE).foreground);
+        assertEquals(text, scheme.getStyle(TokenTypes.LITERAL_NUMBER_DECIMAL_INT).foreground);
+        assertEquals(text, scheme.getStyle(TokenTypes.IDENTIFIER).foreground);
+
+        // On: the colours come back.
+        SwingUtilities.invokeAndWait(
+                () -> area.options().setOn(PrettifyTextArea.Option.SYNTAX_HIGHLIGHT, true));
+        scheme = schemeOf(area);
+        assertEquals(stringFg, scheme.getStyle(TokenTypes.LITERAL_STRING_DOUBLE_QUOTE).foreground);
+        assertEquals(numberFg, scheme.getStyle(TokenTypes.LITERAL_NUMBER_DECIMAL_INT).foreground);
+    }
+
+    @Test
+    void theTogglesSurviveASaveLoadRoundtrip() throws Exception {
+        HttpMessage message = new HttpMessage(new HttpRequestHeader(HEADER));
+        message.setRequestBody("{\"a\":1}");
+        BodyModel model = new BodyModel();
+        model.setMessage(message);
+
+        PrettifyHttpPanelView view =
+                new PrettifyHttpPanelView(
+                        "test", "test", null, PrettifyHttpPanelView.Target.REQUEST_BODY, model);
+        PrettifyTextArea area = textAreaOf(view);
+        waitUntil(() -> !area.getText().isEmpty());
+        SwingUtilities.invokeAndWait(
+                () -> {
+                    PrettifyTextArea.Options options = area.options();
+                    options.setOn(PrettifyTextArea.Option.FORMAT, false);
+                    options.setOn(PrettifyTextArea.Option.WRAP, false);
+                    options.setOn(PrettifyTextArea.Option.SYNTAX_HIGHLIGHT, false);
+                    options.setOn(PrettifyTextArea.Option.UPDATE_CONTENT_TYPE, false);
+                });
+        view.setParentConfigurationKey("panel.");
+        ZapXmlConfiguration configuration = new ZapXmlConfiguration();
+        view.saveConfiguration(configuration);
+
+        // A fresh view of the same kind reads the saved view: the pieces the toggles move are
+        // exactly where the view left them.
+        HttpMessage reloaded = new HttpMessage(new HttpRequestHeader(HEADER));
+        reloaded.setRequestBody("{\"a\":1}");
+        BodyModel reloadedModel = new BodyModel();
+        reloadedModel.setMessage(reloaded);
+        PrettifyHttpPanelView loaded =
+                new PrettifyHttpPanelView(
+                        "test", "test", null, PrettifyHttpPanelView.Target.REQUEST_BODY, reloadedModel);
+        loaded.setParentConfigurationKey("panel.");
+        loaded.loadConfiguration(configuration);
+        PrettifyTextArea loadedArea = textAreaOf(loaded);
+        boolean[] states = new boolean[4];
+        SwingUtilities.invokeAndWait(
+                () -> {
+                    states[0] = loadedArea.options().isOn(PrettifyTextArea.Option.FORMAT);
+                    states[1] = loadedArea.options().isOn(PrettifyTextArea.Option.WRAP);
+                    states[2] = loadedArea.options().isOn(PrettifyTextArea.Option.SYNTAX_HIGHLIGHT);
+                    states[3] = loadedArea.options().isOn(PrettifyTextArea.Option.UPDATE_CONTENT_TYPE);
+                });
+        assertFalse(states[0] || states[1] || states[2] || states[3], "saved: " + List.of(states));
+        assertFalse(loadedArea.isSyntaxHighlightingEnabled(), "highlight plain");
     }
 
     @Test
@@ -938,6 +1132,25 @@ class PrettifyHttpPanelViewTest {
         Field field = PrettifyHttpPanelView.class.getDeclaredField("textArea");
         field.setAccessible(true);
         return (PrettifyTextArea) field.get(view);
+    }
+
+    private static RTextScrollPane scrollPaneOf(PrettifyHttpPanelView view) throws Exception {
+        Field field = PrettifyHttpPanelView.class.getDeclaredField("scrollPane");
+        field.setAccessible(true);
+        return (RTextScrollPane) field.get(view);
+    }
+
+    /** The scheme read on the EDT, so the document paint state is the same one being reasoned about. */
+    private static SyntaxScheme schemeOf(PrettifyTextArea area) throws Exception {
+        SyntaxScheme[] scheme = new SyntaxScheme[1];
+        try {
+            SwingUtilities.invokeAndWait(() -> scheme[0] = area.getSyntaxScheme());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            throw new IllegalStateException(e.getCause());
+        }
+        return scheme[0];
     }
 
     private static void waitUntil(BooleanSupplier condition) throws Exception {

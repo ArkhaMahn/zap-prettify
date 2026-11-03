@@ -85,6 +85,12 @@ public class PrettifyTextArea extends RSyntaxTextArea {
      */
     private boolean configuredWrap = true;
 
+    /**
+     * Whether tokens are coloured by the theme. Off, every token is drawn in the plain text
+     * colour, so the message reads like raw text while the rendering pipeline stays the same.
+     */
+    private boolean syntaxHighlighting = true;
+
     /** The raw message text the view is showing, used to map a copy back to the received bytes. */
     private String rawText;
 
@@ -253,6 +259,26 @@ public class PrettifyTextArea extends RSyntaxTextArea {
         return configuredWrap;
     }
 
+    /** Turns the theme's token colours on or off; the whole view repaints immediately. */
+    void setSyntaxHighlightingEnabled(boolean enabled) {
+        if (syntaxHighlighting == enabled) {
+            return;
+        }
+        syntaxHighlighting = enabled;
+        applySyntaxScheme();
+    }
+
+    /** Whether tokens are coloured by the theme. */
+    boolean isSyntaxHighlightingEnabled() {
+        return syntaxHighlighting;
+    }
+
+    /** Installs the scheme the highlighting flag asks for, with the current theme's palette. */
+    private void applySyntaxScheme() {
+        PrettifyTheme theme = dark ? PrettifyTheme.DARK : PrettifyTheme.LIGHT;
+        setSyntaxScheme(syntaxHighlighting ? new PrettifySyntaxScheme(theme) : PrettifySyntaxScheme.plain(theme));
+    }
+
     /**
      * Applies the effective wrap mode: an editable view follows the user's setting, a read-only
      * view never soft-wraps because its text is already pre-split to the viewport width.
@@ -283,29 +309,45 @@ public class PrettifyTextArea extends RSyntaxTextArea {
         this.pasteFormatter = formatter;
     }
 
-    /** Bridges the view's content-type toggle to the popup menu entry of the text area. */
-    interface ContentTypeToggle {
+    /** Bridges the view's per-view options to the pop-up menu entries of the text area. */
+    enum Option {
 
         /** Whether saving the message adds the Content-Type the body implies. */
-        boolean isOn();
+        UPDATE_CONTENT_TYPE,
 
-        /** Sets whether saving the message adds the Content-Type the body implies. */
-        void setOn(boolean on);
+        /** Whether long lines are soft-wrapped (editing) or pre-split (read-only). */
+        WRAP,
 
-        /** Whether the message shown can be saved from this view (editable request views only). */
-        boolean isApplicable();
+        /** Whether the message is pretty-printed or shown as received. */
+        FORMAT,
+
+        /** Whether tokens are coloured by the theme or all drawn in the text colour. */
+        SYNTAX_HIGHLIGHT
     }
 
-    private ContentTypeToggle contentTypeToggle;
+    /** The per-view options a view offers (the "Pretty view" pop-up gateways to them). */
+    interface Options {
 
-    /** Called by the view, so the popup menu can offer the view's content-type decision. */
-    void setContentTypeToggle(ContentTypeToggle toggle) {
-        this.contentTypeToggle = toggle;
+        /** Whether the option is on for the view. */
+        boolean isOn(Option option);
+
+        /** Flips the option for the view. */
+        void setOn(Option option, boolean on);
+
+        /** Whether the option makes sense for the part of the message the view shows. */
+        boolean isApplicable(Option option);
     }
 
-    /** The view's content-type toggle, or {@code null} when the view does not offer one. */
-    ContentTypeToggle contentTypeToggle() {
-        return contentTypeToggle;
+    private Options options;
+
+    /** Called by the view, so the pop-up menu can offer the view's own decisions. */
+    void setOptions(Options options) {
+        this.options = options;
+    }
+
+    /** The view's options, or {@code null} when the view does not offer the pop-up menu. */
+    Options options() {
+        return options;
     }
 
     /** Formats a pasted body before inserting it. The formatted text is inserted as one atomic edit,
@@ -573,7 +615,7 @@ public class PrettifyTextArea extends RSyntaxTextArea {
         setCaretColor(theme.getText());
         setSelectionColor(theme.getSelectionBackground());
         setSelectedTextColor(theme.getSelectionForeground());
-        setSyntaxScheme(new PrettifySyntaxScheme(theme));
+        applySyntaxScheme();
         setFont(editorFont());
     }
 
