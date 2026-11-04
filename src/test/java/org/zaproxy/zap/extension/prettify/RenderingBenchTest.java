@@ -65,11 +65,15 @@ class RenderingBenchTest {
                                 "document build",
                                 () ->
                                         ChunkedTextLoader.buildDocument(
-                                                split.displayText(), style, split, () -> false, false));
+                                                split.displayText(),
+                                                style,
+                                                split,
+                                                widths,
+                                                () -> false,
+                                                false));
 
-                RSyntaxTextArea proxy = new RSyntaxTextArea();
+                PrettifyTextArea proxy = new PrettifyTextArea(false);
                 proxy.setSyntaxEditingStyle(style);
-                proxy.setLineWrap(false);
                 proxy.setFont(font);
                 proxy.setDocument(document);
                 clearEditorMetricsFlag(proxy);
@@ -79,7 +83,10 @@ class RenderingBenchTest {
                         new BufferedImage(VIEW_WIDTH, 700, BufferedImage.TYPE_INT_ARGB);
                 proxy.paint(canvas.createGraphics());
                 System.out.printf(
-                        "layout+paint %-4s %d ms%n", "", (System.nanoTime() - start) / 1_000_000);
+                        "layout+paint %-4s %d ms  view=%s%n",
+                        "",
+                        (System.nanoTime() - start) / 1_000_000,
+                        proxy.getUI().getRootView(proxy).getView(0).getClass().getSimpleName());
                 proxy.setDocument(new RSyntaxDocument("text/plain"));
             }
         }

@@ -8,8 +8,9 @@ import org.fife.ui.rsyntaxtextarea.RSyntaxTextAreaUI;
 
 /**
  * The RSyntaxTextArea UI for {@link PrettifyTextArea}. Identical to {@link RSyntaxTextAreaUI}
- * except that wrapped lines use {@link PrettifyWrappedSyntaxView}, which breaks at character
- * boundaries.
+ * except for the views: wrapped lines use {@link PrettifyWrappedSyntaxView}, which breaks at
+ * character boundaries, and pre-split documents use {@link PrettifyRowsView}, whose width comes
+ * measured from the render pipeline instead of being scanned row by row on the EDT.
  */
 public class PrettifyTextAreaUI extends RSyntaxTextAreaUI {
 
@@ -19,6 +20,14 @@ public class PrettifyTextAreaUI extends RSyntaxTextAreaUI {
 
     @Override
     public View create(Element elem) {
+        if (elem.getDocument() instanceof PrettifyDocument) {
+            PrettifyDocument document = (PrettifyDocument) elem.getDocument();
+            if (!document.isEdited() && document.maxRowWidthPx() >= 0f) {
+                // The rows are the pre-split display rows, and the widest one is already known:
+                // the stock width scan over every row never runs.
+                return new PrettifyRowsView(elem);
+            }
+        }
         if (getRTextArea() instanceof RSyntaxTextArea
                 && ((RSyntaxTextArea) getRTextArea()).getLineWrap()) {
             return new PrettifyWrappedSyntaxView(elem);

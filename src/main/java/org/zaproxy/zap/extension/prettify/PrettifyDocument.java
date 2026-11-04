@@ -74,6 +74,14 @@ public class PrettifyDocument extends RSyntaxDocument {
      */
     private final boolean replayEnabled;
 
+    /**
+     * The widest row's painted width, in pixels, measured off the EDT with the same advances the
+     * text is painted with (see {@link ChunkedTextLoader}); -1 when it was not measured. The
+     * value stays as measured once the text changed in the text area: it no longer describes
+     * every row then, and {@link #isEdited()} says so.
+     */
+    private volatile float maxRowWidthPx = -1f;
+
     public PrettifyDocument(
             TokenMakerFactory tokenMakerFactory,
             String styleKey,
@@ -106,6 +114,25 @@ public class PrettifyDocument extends RSyntaxDocument {
         this.fallbackTokenMaker = tokenMakerFactory.getTokenMaker(styleKey);
         this.continuationStarts = continuationStarts(split);
         this.lineState = new int[Math.max(16, lineCount())];
+    }
+
+    /** The widest row's painted width, in pixels; -1 when it was not measured. */
+    public float maxRowWidthPx() {
+        return maxRowWidthPx;
+    }
+
+    /**
+     * Notes the widest row's painted width. Measured off the EDT before the document is
+     * installed (see {@link ChunkedTextLoader}), so the view never measures every row's width
+     * on the EDT just to find the widest one.
+     */
+    public void setMaxRowWidthPx(float maxRowWidthPx) {
+        this.maxRowWidthPx = maxRowWidthPx;
+    }
+
+    /** Whether the text changed in the text area (measured widths no longer describe the rows). */
+    public boolean isEdited() {
+        return edited;
     }
 
     /**

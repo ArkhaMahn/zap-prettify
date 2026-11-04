@@ -584,7 +584,7 @@ public class PrettifyHttpPanelView
             // text views, a Ctrl+Z then takes the fresh view back to the empty text area.
             document =
                     ChunkedTextLoader.buildDocument(
-                            "", style, usedSplit, () -> gen != generation, editable);
+                            "", style, usedSplit, null, () -> gen != generation, editable);
             if (document == null) {
                 return;
             }
@@ -599,6 +599,7 @@ public class PrettifyHttpPanelView
                                 usedSplit.displayText(),
                                 style,
                                 usedSplit,
+                                widths,
                                 () -> gen != generation,
                                 editable);
                 if (document == null) {
