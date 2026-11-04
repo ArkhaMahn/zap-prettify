@@ -26,10 +26,10 @@ import org.fife.ui.rsyntaxtextarea.TokenTypes;
  * for the whole pipeline, and the wrapped rows are coloured exactly like the unwrapped view.
  *
  * <p>Only the styles the splitter could tokenize carry spans; for everything else (no style, no
- * token maker, or a message that did not wrap) the spans are empty and the ordinary RSTA
- * tokenization runs as before. HTTP messages additionally need the state-aware handling below when
- * their spans are empty, because RSTA's own state carry does not understand the HTTP token maker's
- * end-of-line state encoding.
+ * token maker, or an enormous text) the spans are empty and the ordinary RSTA tokenization runs as
+ * before. HTTP messages additionally need the state-aware handling below when their spans are
+ * empty, because RSTA's own state carry does not understand the HTTP token maker's end-of-line
+ * state encoding.
  */
 public class PrettifyDocument extends RSyntaxDocument {
 
@@ -409,9 +409,19 @@ public class PrettifyDocument extends RSyntaxDocument {
     /** Case-insensitive {@code indexOf}, so the text does not have to be lowercased first. */
     private static int indexOfIgnoreCase(String text, String needle, int from) {
         int limit = text.length() - needle.length();
+        // The call to regionMatches, which compares every glyph pair along the needle, is far too
+        // slow to make once per position: scanning a large document scores a call at every offset
+        // (hundreds of milliseconds per megabyte). The first glyph of the needle (a '<' for a tag,
+        // a '-' for a comment marker) is so selective that only the rare matching offsets need it.
+        char first = needle.charAt(0);
+        char firstLower = Character.toLowerCase(first);
+        char firstUpper = Character.toUpperCase(first);
         for (int i = Math.max(0, from); i <= limit; i++) {
-            if (text.regionMatches(true, i, needle, 0, needle.length())) {
-                return i;
+            char c = text.charAt(i);
+            if (c == firstLower || c == firstUpper) {
+                if (text.regionMatches(true, i, needle, 0, needle.length())) {
+                    return i;
+                }
             }
         }
         return -1;

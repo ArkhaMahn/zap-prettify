@@ -104,9 +104,9 @@ public final class DisplayTextSplitter {
         }
         List<Integer> breakOffsets = new ArrayList<>();
         List<Integer> breakIndents = new ArrayList<>();
-        List<Integer> tokenStarts = new ArrayList<>();
-        List<Integer> tokenEnds = new ArrayList<>();
-        List<Integer> tokenTypes = new ArrayList<>();
+        IntList tokenStarts = new IntList();
+        IntList tokenEnds = new IntList();
+        IntList tokenTypes = new IntList();
         // Which logical lines wrap, recorded while the display text is built. Tokenizing is only
         // needed when something actually wraps; typical messages never reach the width limit, so
         // this also means the text is walked once, not twice.
@@ -165,9 +165,9 @@ public final class DisplayTextSplitter {
                 string,
                 toIntArray(breakOffsets),
                 toIntArray(breakIndents),
-                toIntArray(tokenStarts),
-                toIntArray(tokenEnds),
-                toIntArray(tokenTypes));
+                tokenStarts.toArray(),
+                tokenEnds.toArray(),
+                tokenTypes.toArray());
     }
 
     private static void appendLineByWidth(
@@ -236,9 +236,9 @@ public final class DisplayTextSplitter {
             int rowStart,
             int rowEnd,
             int contentDisplayStart,
-            List<Integer> tokenStarts,
-            List<Integer> tokenEnds,
-            List<Integer> tokenTypes) {
+            IntList tokenStarts,
+            IntList tokenEnds,
+            IntList tokenTypes) {
         if (info == null || info.tokenType == null || rowStart >= rowEnd) {
             return;
         }
@@ -275,17 +275,19 @@ public final class DisplayTextSplitter {
     }
 
     /**
-     * Records the token spans of every display row once the text has been split. Only called when
-     * at least one break was inserted, so an unwrapped message never pays for it.
+     * Records the token spans of every display row once the text has been split. Called for a
+     * width-aware split that broke at least one row (an unbroken one keeps the document's own
+     * tokenization instead), and for a chunked split whose style has a token maker, whose document
+     * has no other chance to tokenize the rows it paints.
      */
     private static void recordAllRowTokens(
             TokenInfo info,
             StringBuilder display,
             int[] breakOffsets,
             int[] breakIndents,
-            List<Integer> tokenStarts,
-            List<Integer> tokenEnds,
-            List<Integer> tokenTypes) {
+            IntList tokenStarts,
+            IntList tokenEnds,
+            IntList tokenTypes) {
         int n = display.length();
         int breakIndex = 0;
         int originalPos = 0;
@@ -802,36 +804,88 @@ public final class DisplayTextSplitter {
     }
 
     /**
-     * Splits {@code string} using fixed chunk lengths, ignoring the view width.
+     * Splits {@code string} using fixed chunk lengths, ignoring the view width. No token spans are
+     * recorded; {@link #split(String, String)} is the variant that carries the tokens for the
+     * document to replay.
      */
     public static Split split(String string) {
+        return split(string, null);
+    }
+
+    /**
+     * Splits {@code string} like {@link #split(String)}, and, when {@code style} has a token maker,
+     * records the token spans of every display row. The document built from this split then replays
+     * them ({@link PrettifyDocument} fills with a no-op base token maker) instead of tokenizing the
+     * text a second time while it is filled - the dominant cost for a large message - and a token a
+     * chunk break cut in half keeps the colour of the original token. When {@code style} is null
+     * (or has no token maker, or the text is enormous) the spans are empty and the ordinary RSTA
+     * tokenization runs as before.
+     */
+    public static Split split(String string, String style) {
         if (string == null || string.isEmpty()) {
             String s = string == null ? "" : string;
             return new Split(s, s, new int[0]);
         }
         List<Integer> breakOffsets = new ArrayList<>();
         StringBuilder display = new StringBuilder(string.length() + 1024);
+        // Chunk-broken lines: a line the split broke is tokenized like a wrapped one, so its rows
+        // replay the original tokens instead of re-reading the cut fragments line by line.
+        java.util.BitSet brokenLines = new java.util.BitSet();
         int lineStart = 0;
+        int lineIndex = 0;
         for (int i = 0; i < string.length(); i++) {
             // Only '\n' (and '\r\n') separates lines; a lone '\r' is ordinary content.
             if (string.charAt(i) == '\n') {
-                copyChunked(string, lineStart, i, display, breakOffsets);
+                if (copyChunked(string, lineStart, i, display, breakOffsets) > 0) {
+                    brokenLines.set(lineIndex);
+                }
                 display.append('\n');
                 lineStart = i + 1;
+                lineIndex++;
             }
         }
-        copyChunked(string, lineStart, string.length(), display, breakOffsets);
-        return new Split(display.toString(), string, toIntArray(breakOffsets));
+        if (copyChunked(string, lineStart, string.length(), display, breakOffsets) > 0) {
+            brokenLines.set(lineIndex);
+        }
+        IntList tokenStarts = new IntList();
+        IntList tokenEnds = new IntList();
+        IntList tokenTypes = new IntList();
+        TokenInfo info = tokenInfo(string, style, brokenLines);
+        if (info != null) {
+            // Chunked breaks inject no indentation, so the indents are zero for every break.
+            recordAllRowTokens(
+                    info,
+                    display,
+                    toIntArray(breakOffsets),
+                    new int[breakOffsets.size()],
+                    tokenStarts,
+                    tokenEnds,
+                    tokenTypes);
+        }
+        return new Split(
+                display.toString(),
+                string,
+                toIntArray(breakOffsets),
+                new int[breakOffsets.size()],
+                tokenStarts.toArray(),
+                tokenEnds.toArray(),
+                tokenTypes.toArray());
     }
 
-    private static void copyChunked(
+    /**
+     * Copies the line {@code [start, end)}, breaking it every {@link #CHUNK_CHARS} characters
+     * (inside a string or comment, every {@link #MAX_CHUNK_CHARS}), and returns how many breaks it
+     * inserted.
+     */
+    private static int copyChunked(
             String string, int start, int end, StringBuilder display, List<Integer> breakOffsets) {
         int length = end - start;
+        int breaks = 0;
         if (length <= CHUNK_CHARS) {
             if (length > 0) {
                 display.append(string, start, end);
             }
-            return;
+            return 0;
         }
         int chunkStart = start;
         char quote = '\0';
@@ -841,6 +895,7 @@ public final class DisplayTextSplitter {
             int limit = quote == '\0' ? CHUNK_CHARS : MAX_CHUNK_CHARS;
             if (i - chunkStart >= limit) {
                 chunkStart = emitBreak(string, chunkStart, i, display, breakOffsets);
+                breaks++;
             }
             char c = string.charAt(i);
             if (comment == LINE_COMMENT) {
@@ -885,6 +940,7 @@ public final class DisplayTextSplitter {
         if (end > chunkStart) {
             display.append(string, chunkStart, end);
         }
+        return breaks;
     }
 
     private static int emitBreak(
@@ -893,6 +949,30 @@ public final class DisplayTextSplitter {
         breakOffsets.add(display.length());
         display.append('\n');
         return end;
+    }
+
+    /**
+     * A growable list of primitive ints, for the per-token spans: a large message's span count is
+     * in the hundreds of thousands, and the boxing a plain list does for them (three boxed values
+     * per token, freed through every re-split) is a measurable slice of the tokenization pass.
+     */
+    private static final class IntList {
+
+        private int[] values = new int[64];
+        private int count;
+
+        void add(int value) {
+            if (count == values.length) {
+                int[] grown = new int[count * 2];
+                System.arraycopy(values, 0, grown, 0, count);
+                values = grown;
+            }
+            values[count++] = value;
+        }
+
+        int[] toArray() {
+            return java.util.Arrays.copyOf(values, count);
+        }
     }
 
     private static int[] toIntArray(List<Integer> list) {

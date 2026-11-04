@@ -344,6 +344,56 @@ class PrettifyHttpPanelViewTest {
     }
 
     /**
+     * The wrap-off view replays the token spans its chunked split recorded: a minified one-line
+     * body is shown as chunk rows, and a token a chunk break cut in half keeps the colour of the
+     * whole token, instead of showing whatever the pieces alone tokenize to.
+     */
+    @Test
+    void aWrapOffViewReplaysTheRecordedSpansAcrossChunkBreaks() throws Exception {
+        String header =
+                "POST http://example.com/ HTTP/1.1\r\n"
+                        + "Host: example.com\r\n"
+                        + "Content-Type: application/javascript\r\n"
+                        + "\r\n";
+        HttpMessage message = new HttpMessage(new HttpRequestHeader(header));
+        message.setRequestBody("var s=\"" + "a".repeat(5000) + "\";");
+        BodyModel model = new BodyModel();
+        model.setMessage(message);
+
+        PrettifyHttpPanelView view =
+                new PrettifyHttpPanelView(
+                        "test", "test", null, PrettifyHttpPanelView.Target.REQUEST_BODY, model);
+        PrettifyTextArea area = textAreaOf(view);
+        waitUntil(() -> !area.getText().isEmpty());
+
+        // Wrap off: the body's single line becomes chunk rows, filled without a second
+        // tokenization (the base token maker stays out of it while the spans are replayed).
+        Object wrappedDocument = documentOf(area);
+        SwingUtilities.invokeAndWait(
+                () -> area.options().setOn(PrettifyTextArea.Option.WRAP, false));
+        waitUntil(() -> documentOf(area) != wrappedDocument);
+        PrettifyDocument document = (PrettifyDocument) documentOf(area);
+        assertTrue(textOf(area).contains("\n"), "the display carries the chunk breaks");
+
+        // The last chunk row begins mid-string; a tokenizer that starts cold on that row alone
+        // would colour its pieces as code. The replayed span keeps the string colour.
+        int lastRow = document.getDefaultRootElement().getElementCount() - 1;
+        int[] type = {-1};
+        SwingUtilities.invokeAndWait(
+                () -> {
+                    Token token = document.getTokenListForLine(lastRow);
+                    while (token != null && token.length() == 0) {
+                        token = token.getNextToken();
+                    }
+                    type[0] = token == null ? -1 : token.getType();
+                });
+        assertEquals(
+                TokenTypes.LITERAL_STRING_DOUBLE_QUOTE,
+                type[0],
+                "the row cut out of the string keeps the string colour");
+    }
+
+    /**
      * Re-rendering the message an editor already shows (a resize echo, an option re-flip, ZAP's
      * repeated notifications) is very common. The render runs, but the artifacts of the previous
      * one are the artifacts it needs: the prepared document is reused, and the already-laid-out

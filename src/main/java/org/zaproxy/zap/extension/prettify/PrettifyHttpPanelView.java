@@ -533,8 +533,10 @@ public class PrettifyHttpPanelView
             usedSplit = DisplayTextSplitter.split(display, style, widthPx, widths);
         } else {
             // Wrap off, read-only: the received rows are kept, so the viewport scrolls past long
-            // rows instead of the text being reflowed to fit it.
-            usedSplit = DisplayTextSplitter.split(display);
+            // rows instead of the text being reflowed to fit it. The style's tokens are recorded
+            // like for the wrapped view, so the document replays them instead of tokenizing the
+            // text again while it is filled, and a token cut by a chunk break keeps its colour.
+            usedSplit = DisplayTextSplitter.split(display, style);
         }
         if (!editable && !reuseSplit) {
             cachedSplit = usedSplit;
