@@ -46,4 +46,44 @@ class PrettyPrintTest {
         }
         return count;
     }
+
+    @Test
+    void keepsLineCommentAfterAClosingBraceOnItsOwnLine() {
+        String formatted =
+                PrettyPrint.formatBody(
+                        "text/javascript",
+                        "function f() {\n  if (x) {\n    y();\n  }\n  // note\n  return 1;\n}\n");
+        assertEquals(
+                "function f() {\n  if (x) {\n    y();\n  }\n  // note\n  return 1;\n}",
+                formatted);
+    }
+
+    @Test
+    void keepsMultiLineDocCommentVerbatimAndSeparatesItFromWhatFollows() {
+        String formatted =
+                PrettyPrint.formatBody(
+                        "text/javascript",
+                        "/**\n * @param {ArrayBuffer} bytes\n * @see https://example.com\n"
+                                + " */\nfunction f(bytes) {\n  return 1;\n}\n");
+        assertEquals(
+                "/**\n * @param {ArrayBuffer} bytes\n * @see https://example.com\n"
+                        + " */\nfunction f(bytes) {\n  return 1;\n}",
+                formatted);
+    }
+
+    @Test
+    void keepsMultiLineBlockCommentBetweenStatements() {
+        String formatted =
+                PrettyPrint.formatBody(
+                        "text/javascript",
+                        "var a = 1;\n/* multi\nline */\nvar b = 2;\n");
+        assertEquals("var a = 1;\n/* multi\nline */\nvar b = 2;", formatted);
+    }
+
+    @Test
+    void keepsTrailingBlockCommentOnOneLine() {
+        String formatted =
+                PrettyPrint.formatBody("text/javascript", "{ a(); } /* trailing */ b();\n");
+        assertEquals("{\n  a();\n} /* trailing */ b();", formatted);
+    }
 }

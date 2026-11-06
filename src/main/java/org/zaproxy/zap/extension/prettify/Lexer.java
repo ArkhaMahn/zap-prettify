@@ -67,6 +67,7 @@ final class Lexer {
         Lexer lex = new Lexer(body.length());
         int n = body.length();
         int state = 0;
+        boolean blockCommentPastLine = false;
         int lineStart = 0;
         int pos = 0;
         try {
@@ -105,6 +106,7 @@ final class Lexer {
                         int lastPaintableType = -1;
                         int lastPaintableEnd = -1;
                         boolean unclosedRegex = false;
+                        blockCommentPastLine = false;
                         for (Token x = t; x != null; x = x.getNextToken()) {
                             int type = x.getType();
                             if (type == TokenTypes.NULL) {
@@ -143,6 +145,21 @@ final class Lexer {
                             }
                             lastPaintableType = type;
                             lastPaintableEnd = to;
+                            if (x.isPaintable() && type != TokenTypes.WHITESPACE) {
+                                // Whether this token leaves a block or documentation comment
+                                // open past the end of the line. The closing NULL token is not
+                                // paintable and its reported type is the carried state, so it
+                                // must not erase what the line's last real token says. A comment
+                                // keyword token only occurs inside such a comment, so it counts
+                                // too; a comment whose token ends in "*/" has closed here.
+                                blockCommentPastLine =
+                                        (type == TokenTypes.COMMENT_MULTILINE
+                                                        || type == TokenTypes.COMMENT_DOCUMENTATION
+                                                        || type == TokenTypes.COMMENT_KEYWORD)
+                                                && !(length >= 2
+                                                        && x.charAt(length - 2) == '*'
+                                                        && x.charAt(length - 1) == '/');
+                            }
                             if (isLiteral(type) || isComment(type)) {
                                 lex.mark(pos, from, to, OPAQUE_FLAG);
                                 if (type == TokenTypes.COMMENT_EOL) {
@@ -182,6 +199,15 @@ final class Lexer {
                             done = true;
                         }
                     } while (retry);
+                }
+                if (nl >= 0 && blockCommentPastLine) {
+                    // A block or documentation comment that runs past the end of this line
+                    // continues on the next line, so this line break belongs to the comment:
+                    // mark it opaque to keep the whole comment one opaque run that the printer
+                    // copies verbatim. Otherwise the break is whitespace to the printer and a
+                    // multi-line comment is flattened onto one line.
+                    int cr = (len > 0 && arr[len - 1] == '\r') ? 1 : 0;
+                    lex.mark(pos, len - cr, len + 1, OPAQUE_FLAG);
                 }
                 lineStart += len + 1;
                 if (nl < 0) {

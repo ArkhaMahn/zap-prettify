@@ -236,12 +236,34 @@ public final class PrettyPrint {
                 while (j < n && lex.isOpaque(j)) {
                     j++;
                 }
+                boolean lineComment = lex.isLineComment(i);
+                // Block comments have no lexer flag of their own; the token maker only
+                // opens one at "/*" (or "<!--" for markup), and an opaque run starting
+                // with one of those is a comment.
+                boolean blockComment =
+                        !lineComment
+                                && (s.startsWith("/*", i) || s.startsWith("<!--", i));
+                if ((lineComment || blockComment)
+                        && !atLineStart
+                        && newlineBefore(s, i)) {
+                    // A comment that starts on its own line stays on its own line, in
+                    // particular a // comment after a } must not be glued onto it (the
+                    // closing brace reads the leading '/' as a continuing operator).
+                    line(out, indent);
+                    atLineStart = true;
+                    pendingSpace = false;
+                }
                 spaceBefore(out, pendingSpace, atLineStart, last);
                 out.append(s, i, j);
                 atLineStart = false;
                 pendingSpace = false;
                 last = s.charAt(j - 1);
-                if (lex.isLineComment(i)) {
+                if (lineComment) {
+                    line(out, indent);
+                    atLineStart = true;
+                } else if (blockComment && newlineAfter(s, j)) {
+                    // A block comment that ends its line stays separated from whatever
+                    // follows it on the next line.
                     line(out, indent);
                     atLineStart = true;
                 }
@@ -1279,6 +1301,36 @@ public final class PrettyPrint {
             i++;
         }
         return i;
+    }
+
+    /** Whether a line break appears in the whitespace in {@code s} ending just before {@code i}. */
+    private static boolean newlineBefore(String s, int i) {
+        int k = i - 1;
+        while (k >= 0) {
+            char ch = s.charAt(k);
+            if (ch == '\n') {
+                return true;
+            }
+            if (ch != ' ' && ch != '\t' && ch != '\r') {
+                return false;
+            }
+            k--;
+        }
+        return false;
+    }
+
+    /** Whether a line break appears in the whitespace in {@code s} starting at {@code i}. */
+    private static boolean newlineAfter(String s, int i) {
+        for (int k = i; k < s.length(); k++) {
+            char ch = s.charAt(k);
+            if (ch == '\n') {
+                return true;
+            }
+            if (ch != ' ' && ch != '\t' && ch != '\r') {
+                return false;
+            }
+        }
+        return false;
     }
 
     private static int endOfString(String s, int start, char quote) {

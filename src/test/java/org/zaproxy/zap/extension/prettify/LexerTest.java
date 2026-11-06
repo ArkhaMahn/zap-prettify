@@ -27,6 +27,27 @@ class LexerTest {
     }
 
     @Test
+    void marksNewlinesInsideAMultiLineCommentOpaque() {
+        String text = "/*\n * x\n */\nvar b = 2;";
+        Lexer lex = Lexer.of("text/javascript", text);
+        assertNotNull(lex);
+        int first = text.indexOf('\n');
+        int second = text.indexOf('\n', first + 1);
+        int third = text.indexOf('\n', second + 1);
+        assertTrue(lex.isOpaque(first), "break inside the comment");
+        assertTrue(lex.isOpaque(second), "break inside the comment");
+        assertFalse(lex.isOpaque(third), "line holding the closer ends the comment");
+    }
+
+    @Test
+    void doesNotMarkTheBreakAfterAClosedBlockCommentOpaque() {
+        String text = "/* x */\nvar b = 2;";
+        Lexer lex = Lexer.of("text/javascript", text);
+        assertNotNull(lex);
+        assertFalse(lex.isOpaque(text.indexOf('\n')), "break after a closed comment");
+    }
+
+    @Test
     void keepsLineCommentStateAcrossTokenizeChunks() {
         String text = "var a=1; // " + "x".repeat(20_000) + "\nvar b=2;";
         Lexer lex = Lexer.of("text/javascript", text);
