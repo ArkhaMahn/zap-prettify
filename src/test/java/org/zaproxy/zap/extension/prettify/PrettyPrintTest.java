@@ -86,4 +86,28 @@ class PrettyPrintTest {
                 PrettyPrint.formatBody("text/javascript", "{ a(); } /* trailing */ b();\n");
         assertEquals("{\n  a();\n} /* trailing */ b();", formatted);
     }
+
+    @Test
+    void movesMultiLineCommentBodyWithItsOpenerWhenReIndented() {
+        String formatted =
+                PrettyPrint.formatBody(
+                        "text/javascript",
+                        "function f() {\n      /**\n       * @param {string} x\n       */\n"
+                                + "  return x;\n}\n");
+        assertEquals(
+                "function f() {\n  /**\n   * @param {string} x\n   */\n  return x;\n}",
+                formatted);
+    }
+
+    @Test
+    void keepsDocCommentAlignmentInScriptInsideMarkup() {
+        String formatted =
+                PrettyPrint.formatBody(
+                        "text/html",
+                        "<html>\n<body>\n<script>\n      /**\n       * @param {string} x\n"
+                                + "       */\n      var t = 1;\n</script>\n</body>\n</html>\n");
+        assertTrue(
+                formatted.contains("      /**\n       * @param {string} x\n       */\n"),
+                "the comment body must not be indented twice: " + formatted);
+    }
 }

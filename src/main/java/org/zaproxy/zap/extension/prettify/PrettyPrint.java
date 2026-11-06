@@ -254,7 +254,11 @@ public final class PrettyPrint {
                     pendingSpace = false;
                 }
                 spaceBefore(out, pendingSpace, atLineStart, last);
-                out.append(s, i, j);
+                if (blockComment && hasNewline(s, i, j)) {
+                    appendCommentBody(out, s, i, j);
+                } else {
+                    out.append(s, i, j);
+                }
                 atLineStart = false;
                 pendingSpace = false;
                 last = s.charAt(j - 1);
@@ -1331,6 +1335,62 @@ public final class PrettyPrint {
             }
         }
         return false;
+    }
+
+    /**
+     * Appends a multi-line block comment, moving its body with it. The comment is copied
+     * verbatim, so each continuation line is shifted by the same amount the comment's first
+     * line moved: without this, re-indenting the comment (or being appended under a markup
+     * indent) would spread its body twice as far from the margin, misaligning it with the
+     * opener.
+     */
+    private static void appendCommentBody(StringBuilder out, String s, int i, int j) {
+        int delta = currentColumn(out) - columnOf(s, i);
+        int p = i;
+        while (p < j) {
+            int nl = s.indexOf('\n', p);
+            int end = (nl < 0 || nl >= j) ? j : nl;
+            if (p == i) {
+                out.append(s, p, end);
+            } else {
+                int lead = 0;
+                while (p + lead < end
+                        && (s.charAt(p + lead) == ' ' || s.charAt(p + lead) == '\t')) {
+                    lead++;
+                }
+                out.append('\n');
+                out.append(" ".repeat(Math.max(0, lead + delta)));
+                out.append(s, p + lead, end);
+            }
+            if (end >= j) {
+                break;
+            }
+            p = end + 1;
+        }
+    }
+
+    /** Chars since the last line break in {@code out}: the column the next append lands at. */
+    private static int currentColumn(StringBuilder out) {
+        int col = 0;
+        for (int k = out.length() - 1; k >= 0 && out.charAt(k) != '\n'; k--) {
+            col++;
+        }
+        return col;
+    }
+
+    /** Chars since the last line break in {@code s} to {@code at}. */
+    private static int columnOf(String s, int at) {
+        int k = at;
+        while (k > 0 && s.charAt(k - 1) != '\n') {
+            k--;
+        }
+        return at - k;
+    }
+
+    /** Whether a line break appears in {@code s} in {@code [i, j)}. */
+    private static boolean hasNewline(String s, int i, int j) {
+        int nl = s.indexOf('\n', i);
+        return nl >= 0 && nl < j;
     }
 
     private static int endOfString(String s, int start, char quote) {
