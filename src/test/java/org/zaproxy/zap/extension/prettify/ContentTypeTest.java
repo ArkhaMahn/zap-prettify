@@ -103,24 +103,23 @@ class ContentTypeTest {
     }
 
     @Test
-    void requestBodyWithoutStatedTypeDefaultsToForm() {
-        assertEquals(ContentType.FORM_STYLE, ContentType.styleKeyForRequestBody(null, "{\"a\":1}"));
-        assertEquals(ContentType.FORM_STYLE, ContentType.styleKeyForRequestBody("", "{\"a\":1}"));
+    void requestBodyThatIsNotStyledByItsTypeDefaultsToForm() {
+        // An unstated type, an empty one, and types that name no styled highlight (unknown, or
+        // text/plain) all mean urlencoded form parameters for a request.
+        assertEquals(ContentType.FORM_STYLE, ContentType.styleKeyForRequestBody(null));
+        assertEquals(ContentType.FORM_STYLE, ContentType.styleKeyForRequestBody(""));
+        assertEquals(ContentType.FORM_STYLE, ContentType.styleKeyForRequestBody("   "));
         assertEquals(
-                ContentType.FORM_STYLE, ContentType.styleKeyForRequestBody("   ", "{\"a\":1}"));
+                ContentType.FORM_STYLE, ContentType.styleKeyForRequestBody("text/plain"));
+        assertEquals(
+                ContentType.FORM_STYLE,
+                ContentType.styleKeyForRequestBody("application/vnd.acme.thing"));
     }
 
     @Test
     void requestBodyWithStatedTypeUsesTheStatedType() {
-        assertEquals(
-                "text/json", ContentType.styleKeyForRequestBody("application/json", "{\"a\":1}"));
-    }
-
-    @Test
-    void requestBodyWithUndecisiveStatedTypeIsSniffed() {
-        assertEquals(
-                ContentType.PLAIN_STYLE,
-                ContentType.styleKeyForRequestBody("text/plain", "k=v&k2=v2"));
+        assertEquals("text/json", ContentType.styleKeyForRequestBody("application/json"));
+        assertEquals("text/xml", ContentType.styleKeyForRequestBody("application/xml"));
     }
 
     @Test

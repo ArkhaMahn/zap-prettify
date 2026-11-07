@@ -37,6 +37,19 @@ class HttpTokenMakerTest {
     }
 
     @Test
+    void bodyOfARequestWhoseTypeStylesNothingHighlightsAsFormParameters() {
+        List<Token> body =
+                lastLineOf(
+                        new HttpRequestTokenMaker(),
+                        "PUT / HTTP/1.1",
+                        "Host: example.test",
+                        "Content-Type: text/plain",
+                        "",
+                        "k=v&k2=v2");
+        assertFirstMeaningfulTokenIs(body, PrettifyTokenTypes.HTTP_PARAMETER_NAME);
+    }
+
+    @Test
     void bodyOfAnUnstatedResponseStaysUnhighlighted() {
         List<Token> body =
                 lastLineOf(new HttpResponseTokenMaker(), "HTTP/1.1 200 OK", "", "plain text");

@@ -246,19 +246,16 @@ public final class ContentType {
     }
 
     /**
-     * Resolves a style for a request body. A request whose content type is not stated yet - the
-     * usual state while its body is being typed - is highlighted as urlencoded form parameters:
-     * that is what such a body is unless its {@code Content-Type:} header states otherwise. A
-     * stated content type decides as {@link #styleKeyFor(String, String)} does. A response body
-     * has no such default: its unstated type keeps the sniff of
-     * {@link #styleKeyFor(String, String)}, whose hits (JSON, markup, scripts) are response
-     * payloads rather than parameters.
+     * Resolves a style for a request body, which highlights no matter the request verb or content
+     * type. A content type that names a styled type (JSON, markup, whatever else) decides, and
+     * everything else - no stated type, an unknown one, or {@code text/plain} - assumes the
+     * urlencoded form parameters such a body usually is: it keeps form parameters highlighted
+     * rather than being left plain or sniffed. A response body resolves as
+     * {@link #styleKeyFor(String, String)} does, sniff included.
      */
-    public static String styleKeyForRequestBody(String contentType, String bodyPrefix) {
-        if (contentType == null || normalize(contentType).isEmpty()) {
-            return FORM_STYLE;
-        }
-        return styleKeyFor(contentType, bodyPrefix);
+    public static String styleKeyForRequestBody(String contentType) {
+        String style = styleKeyFor(contentType);
+        return PLAIN_STYLE.equals(style) ? FORM_STYLE : style;
     }
 
     /**

@@ -75,9 +75,9 @@ public final class PrettyPrint {
     }
 
     /**
-     * {@link #formatPastedBody(String, String)} for a paste into a request: an unstated content
-     * type makes the text urlencoded form parameters, which are kept exactly as pasted, instead
-     * of being sniffed.
+     * {@link #formatPastedBody(String, String)} for a paste into a request: text that the content
+     * type does not style as something else is urlencoded form parameters, which are kept exactly
+     * as pasted.
      */
     public static String formatPastedRequestBody(String contentType, String text) {
         return formatPastedBody(contentType, text, true);
@@ -89,7 +89,7 @@ public final class PrettyPrint {
         }
         String style =
                 request
-                        ? ContentType.styleKeyForRequestBody(contentType, text)
+                        ? ContentType.styleKeyForRequestBody(contentType)
                         : ContentType.styleKeyFor(contentType, text);
         String formatted = formatBody(style, text);
         if (formatted == null
@@ -111,9 +111,9 @@ public final class PrettyPrint {
     }
 
     /**
-     * {@link #formatMessageFor(String, String, boolean)} for a request: a body without a content
-     * type is treated as urlencoded form parameters (left exactly as they are) rather than
-     * sniffed.
+     * {@link #formatMessageFor(String, String, boolean)} for a request: a body that its content
+     * type does not style as something else is urlencoded form parameters and is left exactly as
+     * it is.
      */
     public static String formatMessageRequestBody(String contentType, String message, boolean reformat) {
         return formatMessageFor(contentType, message, reformat, true);
@@ -131,7 +131,7 @@ public final class PrettyPrint {
         String body = message.substring(split);
         String style =
                 request
-                        ? ContentType.styleKeyForRequestBody(contentType, body)
+                        ? ContentType.styleKeyForRequestBody(contentType)
                         : ContentType.styleKeyFor(contentType, body);
         return message.substring(0, split) + (reformat ? formatBody(style, body) : body);
     }

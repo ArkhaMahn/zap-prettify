@@ -710,7 +710,7 @@ public class PrettifyHttpPanelView
             case RESPONSE_ALL:
                 return PrettyPrint.formatMessageFor(contentType, text, true);
             case REQUEST_BODY:
-                return PrettyPrint.formatBody(ContentType.styleKeyForRequestBody(contentType, text), text);
+                return PrettyPrint.formatBody(ContentType.styleKeyForRequestBody(contentType), text);
             case RESPONSE_BODY:
                 return PrettyPrint.formatBody(ContentType.styleKeyFor(contentType, text), text);
             default:
@@ -1382,15 +1382,18 @@ public class PrettifyHttpPanelView
         resplit();
     }
 
-    /** Syntax highlighting is always applied, based on the fixed style or the content type. */
+    /**
+     * Syntax highlighting is always applied, based on the fixed style or the content type.
+     */
     private String styleFor(String contentType, String body) {
         if (fixedStyleKey != null) {
             return fixedStyleKey;
         }
         if (isRequestTarget()) {
-            // A body typed while its request has no Content-Type header highlights as urlencoded
-            // form parameters, not as the plain (unhighlighted) fallback a response keeps.
-            return ContentType.styleKeyForRequestBody(contentType, body);
+            // A request body highlights as whatever the header names, or as urlencoded form
+            // parameters when it names no styled type; unlike a response body it is never left
+            // plain unhighlighted.
+            return ContentType.styleKeyForRequestBody(contentType);
         }
         return ContentType.styleKeyFor(contentType, body);
     }
