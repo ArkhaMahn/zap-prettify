@@ -49,11 +49,23 @@ final class Lexer {
     static Lexer of(String styleKey, String body) {
         TokenMaker tm;
         try {
-            // Resolve through the Prettify factory, exactly as the display tokenization does, so
-            // every style (including a Prettify-only one) classifies the way the view paints it.
-            tm = PrettifyTokenMakerFactory.bodyTokenMaker(styleKey);
+            // The display tokenization needs the prettify factory's script-key recolouring; the
+            // classification does not - it only needs literals and comments marked opaque, and a
+            // bare identifier prints identically whether it is marked opaque or not. Skipping the
+            // key-colouring pass roughly halves the tokenization of a script body.
+            tm = org.fife.ui.rsyntaxtextarea.TokenMakerFactory.getDefaultInstance()
+                            .getTokenMaker(styleKey);
         } catch (RuntimeException e) {
             return null;
+        }
+        if (tm == null) {
+            // A prettify-only style (GraphQL, form) has no maker of its own: use the one the
+            // prettify factory has for it.
+            try {
+                tm = PrettifyTokenMakerFactory.bodyTokenMaker(styleKey);
+            } catch (RuntimeException e) {
+                return null;
+            }
         }
         if (tm == null) {
             return null;

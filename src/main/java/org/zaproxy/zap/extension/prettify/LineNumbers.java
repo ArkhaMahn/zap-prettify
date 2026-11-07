@@ -24,8 +24,7 @@ public final class LineNumbers {
             // No formatter-inserted lines: every row is a message line, numbered in order.
             return sequential(TextAlignment.countLines(text));
         }
-        int lines = TextAlignment.countLines(text);
-        int[] map = new int[lines];
+        int[] map = new int[Math.max(16, 1)];
         int rawIndex = 0;
         int rawLine = 1;
         int displayLine = 0;
@@ -40,6 +39,7 @@ public final class LineNumbers {
                 if (!seenOnLine) {
                     int blank = blankRawLineAt(source, rawIndex, rawLine, blankCache);
                     if (blank > 0 && blank != lastNumbered) {
+                        map = grow(map, displayLine + 1);
                         map[displayLine] = blank;
                         lastNumbered = blank;
                         rawLine = blank + 1;
@@ -63,11 +63,12 @@ public final class LineNumbers {
             if (rawIndex >= source.length() || source.charAt(rawIndex) != c) {
                 // The formatter changed more than whitespace; ordinary numbering is the only safe
                 // answer.
-                return sequential(lines);
+                return sequential(TextAlignment.countLines(text));
             }
             rawIndex++;
             if (!seenOnLine) {
                 if (rawLine != lastNumbered) {
+                    map = grow(map, displayLine + 1);
                     map[displayLine] = rawLine;
                     lastNumbered = rawLine;
                 }
@@ -77,10 +78,21 @@ public final class LineNumbers {
         if (!seenOnLine) {
             int blank = blankRawLineAt(source, rawIndex, rawLine, blankCache);
             if (blank > 0 && blank != lastNumbered) {
+                map = grow(map, displayLine + 1);
                 map[displayLine] = blank;
             }
         }
-        return map;
+        return java.util.Arrays.copyOf(map, displayLine + 1);
+    }
+
+    /** Grows the line map to at least {@code capacity} entries. */
+    private static int[] grow(int[] map, int capacity) {
+        if (map.length >= capacity) {
+            return map;
+        }
+        int[] grown = new int[Math.max(capacity, map.length * 2)];
+        System.arraycopy(map, 0, grown, 0, map.length);
+        return grown;
     }
 
     /** Line numbers 1..{@code lines}, used when the display text does not align with the raw one. */

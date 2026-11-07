@@ -115,37 +115,47 @@ public final class DisplayTextSplitter {
         StringBuilder display = new StringBuilder(n + n / 16 + 16);
         int lineStart = 0;
         int lineIndex = 0;
+        float maxRowWidthPx = -1f;
         for (int i = 0; i < n; i++) {
             // Only '\n' (and '\r\n') separates lines in the text document; a lone '\r' is ordinary
             // content. Breaking on it here would let the document merge the rows back together.
             if (string.charAt(i) == '\n') {
-                appendLineByWidth(
-                        string,
-                        lineStart,
-                        i,
-                        maxWidth,
-                        widths,
-                        lineIndex,
-                        wrappedLines,
-                        display,
-                        breakOffsets,
-                        breakIndents);
+                maxRowWidthPx =
+                        Math.max(
+                                maxRowWidthPx,
+                                appendLineByWidth(
+                                        string,
+                                        lineStart,
+                                        i,
+                                        maxWidth,
+                                        widths,
+                                        lineIndex,
+                                        wrappedLines,
+                                        display,
+                                        breakOffsets,
+                                        breakIndents));
                 display.append('\n');
                 lineStart = i + 1;
                 lineIndex++;
             }
         }
-        appendLineByWidth(
-                string,
-                lineStart,
-                n,
-                maxWidth,
-                widths,
-                lineIndex,
-                wrappedLines,
-                display,
-                breakOffsets,
-                breakIndents);
+        maxRowWidthPx =
+                Math.max(
+                        maxRowWidthPx,
+                        appendLineByWidth(
+                                string,
+                                lineStart,
+                                n,
+                                maxWidth,
+                                widths,
+                                lineIndex,
+                                wrappedLines,
+                                display,
+                                breakOffsets,
+                                breakIndents));
+        if (maxRowWidthPx < 0) {
+            maxRowWidthPx = 0f;
+        }
         // Tokenize (and record the per-row spans) only when a row was actually broken. Deferring
         // this until after the split is what lets an unwrapped message skip tokenization entirely.
         TokenInfo info =
@@ -167,10 +177,15 @@ public final class DisplayTextSplitter {
                 toIntArray(breakIndents),
                 tokenStarts.toArray(),
                 tokenEnds.toArray(),
-                tokenTypes.toArray());
+                tokenTypes.toArray(),
+                maxRowWidthPx);
     }
 
-    private static void appendLineByWidth(
+    /**
+     * Appends the line {@code [start, end)}, breaking it to fit {@code maxWidth}, and returns the
+     * widest display row's width in pixels.
+     */
+    private static float appendLineByWidth(
             String string,
             int start,
             int end,
@@ -193,6 +208,7 @@ public final class DisplayTextSplitter {
         }
         int segmentStart = start;
         double width = 0;
+        double max = 0;
         int i = start;
         while (i < end) {
             int cp = string.codePointAt(i);
@@ -205,6 +221,7 @@ public final class DisplayTextSplitter {
                 // the break back to a token boundary instead would leave the row short (a header
                 // name stranded before its value, or trailing empty space before the wrap).
                 display.append(string, segmentStart, i);
+                max = Math.max(max, width);
                 breakOffsets.add(display.length());
                 display.append('\n');
                 if (indentLength > 0) {
@@ -221,7 +238,9 @@ public final class DisplayTextSplitter {
         }
         if (segmentStart < end) {
             display.append(string, segmentStart, end);
+            max = Math.max(max, width);
         }
+        return (float) max;
     }
 
     /**
@@ -1016,16 +1035,10 @@ public final class DisplayTextSplitter {
         private final int[] tokenStarts;
         private final int[] tokenEnds;
         private final int[] tokenTypes;
+        private final float maxRowWidthPx;
 
         Split(String displayText, String originalText, int[] breakOffsets) {
-            this(
-                    displayText,
-                    originalText,
-                    breakOffsets,
-                    new int[breakOffsets.length],
-                    new int[0],
-                    new int[0],
-                    new int[0]);
+            this(displayText, originalText, breakOffsets, new int[breakOffsets.length], new int[0], new int[0], new int[0], -1f);
         }
 
         Split(
@@ -1036,6 +1049,26 @@ public final class DisplayTextSplitter {
                 int[] tokenStarts,
                 int[] tokenEnds,
                 int[] tokenTypes) {
+            this(
+                    displayText,
+                    originalText,
+                    breakOffsets,
+                    breakIndents,
+                    tokenStarts,
+                    tokenEnds,
+                    tokenTypes,
+                    -1f);
+        }
+
+        Split(
+                String displayText,
+                String originalText,
+                int[] breakOffsets,
+                int[] breakIndents,
+                int[] tokenStarts,
+                int[] tokenEnds,
+                int[] tokenTypes,
+                float maxRowWidthPx) {
             this.displayText = displayText;
             this.originalText = originalText;
             this.breakOffsets = breakOffsets;
@@ -1043,6 +1076,7 @@ public final class DisplayTextSplitter {
             this.tokenStarts = tokenStarts;
             this.tokenEnds = tokenEnds;
             this.tokenTypes = tokenTypes;
+            this.maxRowWidthPx = maxRowWidthPx;
         }
 
         public String displayText() {
@@ -1078,6 +1112,15 @@ public final class DisplayTextSplitter {
          */
         public int[] tokenStarts() {
             return tokenStarts;
+        }
+
+        /**
+         * The widest display row's width in pixels, measured while the display text was built.
+         * -1 for splits measured none (the chunked split takes no widths, for example), in which
+         * case the caller measures the rows as before.
+         */
+        public float maxRowWidthPx() {
+            return maxRowWidthPx;
         }
 
         public int[] tokenEnds() {

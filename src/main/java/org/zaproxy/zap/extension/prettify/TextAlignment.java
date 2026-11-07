@@ -15,8 +15,14 @@ public final class TextAlignment {
 
     /** Whether {@code a} and {@code b} contain the same non-whitespace characters in order. */
     public static boolean sameNonWhitespace(String a, String b) {
+        if (a == b) {
+            // The same instance is trivially whitespace-equivalent with itself; this is the common
+            // case of a formatter that left the text alone (a body it does not style), where the
+            // full walk would add up to milliseconds of pure checking.
+            return true;
+        }
         if (a == null || b == null) {
-            return a == b;
+            return false;
         }
         int i = 0;
         int j = 0;

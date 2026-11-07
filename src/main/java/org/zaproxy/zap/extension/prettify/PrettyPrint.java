@@ -133,7 +133,14 @@ public final class PrettyPrint {
                 request
                         ? ContentType.styleKeyForRequestBody(contentType)
                         : ContentType.styleKeyFor(contentType, body);
-        return message.substring(0, split) + (reformat ? formatBody(style, body) : body);
+        String formattedBody = reformat ? formatBody(style, body) : body;
+        if (formattedBody == body) {
+            // The formatter left the body alone (a form or a type it does not style): the message
+            // is what it was, so no concatenation copy is needed and the caller's equivalence
+            // check sees the same instance.
+            return message;
+        }
+        return message.substring(0, split) + formattedBody;
     }
 
     /**

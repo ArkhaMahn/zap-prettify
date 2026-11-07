@@ -69,6 +69,7 @@ public final class ChunkedTextLoader {
             boolean editable) {
         String source = text == null ? "" : text;
         String style = styleKey == null ? ContentType.PLAIN_STYLE : styleKey;
+        float measuredRowWidth = split == null ? -1f : split.maxRowWidthPx();
         PrettifyTokenMakerFactory baseFactory = new PrettifyTokenMakerFactory();
         // The ContinuedStringTokenMaker wrapper is needed only for styles whose document token maker
         // parses strings directly. HTTP messages handle string continuation inside the body delegate
@@ -110,8 +111,10 @@ public final class ChunkedTextLoader {
             PrettifyDocument prettifyDocument = (PrettifyDocument) document;
             if (!editable) {
                 // The widest row is measured off the EDT (see maxRowWidth): the view then never
-                // walks every row's glyphs once just to learn the width that spans draw.
-                prettifyDocument.setMaxRowWidthPx(maxRowWidth(source, widths));
+                // walks every row's glyphs once just to learn the width that spans draw. A width
+                // measured while the split was built is reused as it is.
+                prettifyDocument.setMaxRowWidthPx(
+                        measuredRowWidth >= 0f ? measuredRowWidth : maxRowWidth(source, widths));
             }
             // From now on a change in the text area invalidates the recorded tokens.
             prettifyDocument.watchForEdits();
