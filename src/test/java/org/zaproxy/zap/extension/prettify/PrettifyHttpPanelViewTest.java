@@ -26,6 +26,7 @@ import org.parosproxy.paros.network.HttpMessage;
 import org.parosproxy.paros.network.HttpRequestHeader;
 import org.zaproxy.zap.extension.httppanel.view.AbstractStringHttpPanelViewModel;
 import org.zaproxy.zap.extension.httppanel.view.impl.models.http.request.RequestBodyStringHttpPanelViewModel;
+import org.zaproxy.zap.extension.httppanel.view.impl.models.http.request.RequestHeaderStringHttpPanelViewModel;
 import org.zaproxy.zap.extension.httppanel.view.impl.models.http.request.RequestStringHttpPanelViewModel;
 import org.zaproxy.zap.utils.ZapXmlConfiguration;
 
@@ -129,6 +130,85 @@ class PrettifyHttpPanelViewTest {
                 message.getRequestHeader().toString());
         assertEquals("{\"a\":1,\"b\":2}", message.getRequestBody().toString());
         assertTrue(area.getText().contains("\nX-Test: four\n\n"));
+    }
+
+    @Test
+    void aColonLessHeaderLineSurvivesSavingInTheAllView() throws Exception {
+        String header =
+                "POST http://example.com/ HTTP/1.1\r\n"
+                        + "Host: example.com\r\n"
+                        + "\r\n";
+        HttpMessage message = new HttpMessage(new HttpRequestHeader(header));
+        message.setRequestBody("{\"a\":1,\"b\":2}");
+        RequestStringHttpPanelViewModel model = new RequestStringHttpPanelViewModel();
+        model.setMessage(message);
+
+        PrettifyHttpPanelView view =
+                new PrettifyHttpPanelView(
+                        "test", "test", null, PrettifyHttpPanelView.Target.REQUEST_ALL, model);
+        PrettifyTextArea area = textAreaOf(view);
+        waitUntil(() -> !area.getText().isEmpty());
+        Document readOnlyDocument = area.getDocument();
+        SwingUtilities.invokeAndWait(() -> view.setEditable(true));
+        waitUntil(() -> area.getDocument() != readOnlyDocument);
+
+        SwingUtilities.invokeAndWait(
+                () -> {
+                    int separator = area.getText().indexOf("\n\n");
+                    area.setCaretPosition(separator);
+                    // A bare header line with no colon and no value.
+                    area.replaceSelection("\nxxx");
+                    view.save();
+                });
+
+        // The line went into the message as a header with an empty value instead of rejecting the
+        // save; order and the rest of the message are untouched, so it is sent as it is.
+        assertTrue(
+                model.getData().contains("\nxxx: \nContent-Type: application/json\n\n"),
+                "the saved header block: [[" + model.getData() + "]]");
+        assertEquals(List.of(""), message.getRequestHeader().getHeaderValues("xxx"));
+        assertEquals("{\"a\":1,\"b\":2}", message.getRequestBody().toString());
+        assertEquals(
+                "POST http://example.com/ HTTP/1.1\r\n"
+                        + "Host: example.com\r\n"
+                        + "xxx: \r\n"
+                        + "Content-Type: application/json\r\n"
+                        + "\r\n",
+                message.getRequestHeader().toString());
+    }
+
+    @Test
+    void aColonLessHeaderLineSurvivesSavingInTheHeadView() throws Exception {
+        String header =
+                "DELETE http://example.com/ HTTP/1.1\r\n"
+                        + "Host: example.com\r\n"
+                        + "\r\n";
+        HttpMessage message = new HttpMessage(new HttpRequestHeader(header));
+        message.setRequestBody("");
+        RequestHeaderStringHttpPanelViewModel model = new RequestHeaderStringHttpPanelViewModel();
+        model.setMessage(message);
+
+        PrettifyHttpPanelView view =
+                new PrettifyHttpPanelView(
+                        "test", "test", null, PrettifyHttpPanelView.Target.REQUEST_HEAD, model);
+        PrettifyTextArea area = textAreaOf(view);
+        waitUntil(() -> !area.getText().isEmpty());
+        Document readOnlyDocument = area.getDocument();
+        SwingUtilities.invokeAndWait(() -> view.setEditable(true));
+        waitUntil(() -> area.getDocument() != readOnlyDocument);
+
+        SwingUtilities.invokeAndWait(
+                () -> {
+                    area.setCaretPosition(area.getText().length());
+                    area.replaceSelection("\nxxx");
+                    view.save();
+                });
+
+        assertTrue(
+                model.getData().contains("xxx: "),
+                "the saved header block: [[" + model.getData() + "]]");
+        assertEquals(List.of(""), message.getRequestHeader().getHeaderValues("xxx"));
+        assertTrue(message.getRequestHeader().toString().contains("DELETE http://example.com/"));
     }
 
     @Test

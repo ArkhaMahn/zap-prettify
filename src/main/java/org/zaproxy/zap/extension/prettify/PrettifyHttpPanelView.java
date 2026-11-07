@@ -1506,6 +1506,10 @@ public class PrettifyHttpPanelView
         if (newRaw == null) {
             newRaw = edited;
         }
+        // Core's header parse aborts on a colon-less header line, which would drop the whole save
+        // along with the line; give such a line the empty value core itself re-serializes, so it
+        // goes into the message as it is rather than taking the save down with it.
+        newRaw = HeaderLineFix.fixMalformedHeaderLines(newRaw);
         boolean messageChanged = !newRaw.equals(raw);
         if (messageChanged) {
             saving = true;
