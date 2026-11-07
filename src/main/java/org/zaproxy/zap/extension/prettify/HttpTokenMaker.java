@@ -459,6 +459,8 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
      * The token maker for the body, resolved when the first body line asks for it and re-resolved
      * when a content type header read later makes the body's type decisive, so that a body typed
      * before its {@code Content-Type:} header is keyworded once the header names a styled type.
+     * A request body without a content type highlights as urlencoded form parameters, the type
+     * such a body usually is until the header states otherwise. A response body keeps the sniff.
      *
      * <p>A type the header leaves undetermined keeps what the initial resolution decided: the
      * sniff reads the leading text of the whole body, and re-sniffing line by line would only
@@ -470,7 +472,10 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
         if (!bodyResolved) {
             bodyResolved = true;
             bodyContentTypeStale = false;
-            resetBodyDelegate(ContentType.styleKeyFor(bodyContentType, prefixOf(firstLine)));
+            resetBodyDelegate(
+                    response
+                            ? ContentType.styleKeyFor(bodyContentType, prefixOf(firstLine))
+                            : ContentType.styleKeyForRequestBody(bodyContentType, prefixOf(firstLine)));
             // A body always starts fresh, so the caller keeps the carried state as it is.
             return false;
         }

@@ -681,7 +681,15 @@ public class PrettifyHttpPanelView
                 return text;
             }
         }
-        return PrettyPrint.formatPastedBody(contentTypeOf(model.getMessage()), text);
+        Message message = model.getMessage();
+        return isRequestTarget()
+                ? PrettyPrint.formatPastedRequestBody(contentTypeOf(message), text)
+                : PrettyPrint.formatPastedBody(contentTypeOf(message), text);
+    }
+
+    /** Whether this view shows a piece of a request rather than of a response. */
+    private boolean isRequestTarget() {
+        return target == Target.REQUEST_BODY || target == Target.REQUEST_ALL;
     }
 
     /**
@@ -698,9 +706,11 @@ public class PrettifyHttpPanelView
         }
         switch (target) {
             case REQUEST_ALL:
+                return PrettyPrint.formatMessageRequestBody(contentType, text, true);
             case RESPONSE_ALL:
                 return PrettyPrint.formatMessageFor(contentType, text, true);
             case REQUEST_BODY:
+                return PrettyPrint.formatBody(ContentType.styleKeyForRequestBody(contentType, text), text);
             case RESPONSE_BODY:
                 return PrettyPrint.formatBody(ContentType.styleKeyFor(contentType, text), text);
             default:
@@ -1376,6 +1386,11 @@ public class PrettifyHttpPanelView
     private String styleFor(String contentType, String body) {
         if (fixedStyleKey != null) {
             return fixedStyleKey;
+        }
+        if (isRequestTarget()) {
+            // A body typed while its request has no Content-Type header highlights as urlencoded
+            // form parameters, not as the plain (unhighlighted) fallback a response keeps.
+            return ContentType.styleKeyForRequestBody(contentType, body);
         }
         return ContentType.styleKeyFor(contentType, body);
     }

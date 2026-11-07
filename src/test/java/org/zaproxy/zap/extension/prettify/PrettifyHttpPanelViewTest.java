@@ -869,7 +869,7 @@ class PrettifyHttpPanelViewTest {
         Object readOnlyDocument = documentOf(area);
         SwingUtilities.invokeAndWait(() -> view.setEditable(true));
         waitUntil(() -> documentOf(area) != readOnlyDocument);
-        waitUntil(() -> area.getText().contains("\"a\": 1"));
+        waitUntil(() -> area.getText().contains("\"a\":1"));
 
         SwingUtilities.invokeAndWait(
                 () -> {
@@ -891,12 +891,12 @@ class PrettifyHttpPanelViewTest {
         // document of the new session, not on the text: only the swap of the document tells the
         // editable render apart.
         waitUntil(() -> documentOf(area) != documentBeforeReset);
-        waitUntil(() -> area.getText().contains("\"a\": 1"));
+        waitUntil(() -> area.getText().contains("\"a\":1"));
         // The new session starts with the message and nothing on record: there is no state
         // before the message to undo into, and no Ctrl+Z empties the view.
         assertFalse(area.canUndo(), "a fresh session has nothing on record");
         SwingUtilities.invokeAndWait(area::undoLastAction);
-        assertTrue(textOf(area).contains("\"a\": 1"), "undo of an empty walk shows the message");
+        assertTrue(textOf(area).contains("\"a\":1"), "undo of an empty walk shows the message");
         assertFalse(textOf(area).contains("zzz"), "the earlier edit is not carried over");
     }
 
@@ -1117,25 +1117,38 @@ class PrettifyHttpPanelViewTest {
 
         // Typing the body while no Content-Type is in the headers: an editable All view with an
         // empty body does not carry the blank separator line the model has, so the body is started
-        // with its own blank line.
+        // with its own blank line. Unless stated otherwise a request body highlights as urlencoded
+        // form parameters, so the form styling is there right away.
         SwingUtilities.invokeAndWait(
                 () -> {
                     area.setCaretPosition(area.getText().length());
                     area.replaceSelection("\r\n\r\nfoo=bar&baz");
                 });
-        assertEquals(List.of("foo=bar&baz|ID"), tokensOfLastLine(area), "undetermined, so plain");
+        assertEquals(
+                List.of("foo|NAME", "=|OP", "bar|VALUE", "&|SEP", "baz|NAME"),
+                tokensOfLastLine(area),
+                "unstated, so form parameters");
 
-        // The Content-Type naming the body is typed into the header block afterwards.
+        // A Content-Type naming a styled type is typed into the header block afterwards, and the
+        // body is re-highlighted with it.
         SwingUtilities.invokeAndWait(
                 () -> {
                     String text = area.getText();
                     int separator = text.indexOf("\r\n\r\n");
                     assertTrue(separator >= 0, "a separator line exists: " + text);
                     area.setCaretPosition(separator + 2);
-                    area.replaceSelection("Content-Type: application/x-www-form-urlencoded\r\n");
+                    area.replaceSelection("Content-Type: application/json\r\n");
+                });
+        // The re-highlight becomes observable with an appended JSON line: the stated type turned
+        // the body delegate from the form default to JSON, which tokenizes this text. A body the
+        // form delegate kept would paint it as one undecorated parameter value.
+        SwingUtilities.invokeAndWait(
+                () -> {
+                    area.setCaretPosition(area.getText().length());
+                    area.replaceSelection("\r\n{\"k\":1}");
                 });
         assertEquals(
-                List.of("foo|NAME", "=|OP", "bar|VALUE", "&|SEP", "baz|NAME"),
+                List.of("{|SEP", "\"k\"|VAR", ":|ID", "1|NUM", "}|SEP"),
                 tokensOfLastLine(area),
                 "the header makes the type decisive");
     }
@@ -1269,6 +1282,10 @@ class PrettifyHttpPanelViewTest {
                 return "OP";
             case org.fife.ui.rsyntaxtextarea.TokenTypes.SEPARATOR:
                 return "SEP";
+            case org.fife.ui.rsyntaxtextarea.TokenTypes.VARIABLE:
+                return "VAR";
+            case org.fife.ui.rsyntaxtextarea.TokenTypes.LITERAL_NUMBER_DECIMAL_INT:
+                return "NUM";
             case org.fife.ui.rsyntaxtextarea.TokenTypes.WHITESPACE:
                 return "WS";
             case org.fife.ui.rsyntaxtextarea.TokenTypes.IDENTIFIER:

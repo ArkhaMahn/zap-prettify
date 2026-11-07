@@ -71,10 +71,26 @@ public final class PrettyPrint {
      * alter the message's data.
      */
     public static String formatPastedBody(String contentType, String text) {
+        return formatPastedBody(contentType, text, false);
+    }
+
+    /**
+     * {@link #formatPastedBody(String, String)} for a paste into a request: an unstated content
+     * type makes the text urlencoded form parameters, which are kept exactly as pasted, instead
+     * of being sniffed.
+     */
+    public static String formatPastedRequestBody(String contentType, String text) {
+        return formatPastedBody(contentType, text, true);
+    }
+
+    private static String formatPastedBody(String contentType, String text, boolean request) {
         if (text == null || text.isEmpty()) {
             return text;
         }
-        String style = ContentType.styleKeyFor(contentType, text);
+        String style =
+                request
+                        ? ContentType.styleKeyForRequestBody(contentType, text)
+                        : ContentType.styleKeyFor(contentType, text);
         String formatted = formatBody(style, text);
         if (formatted == null
                 || formatted.equals(text)
@@ -91,6 +107,20 @@ public final class PrettyPrint {
      * JavaScript. Optionally leaves the body as it is.
      */
     public static String formatMessageFor(String contentType, String message, boolean reformat) {
+        return formatMessageFor(contentType, message, reformat, false);
+    }
+
+    /**
+     * {@link #formatMessageFor(String, String, boolean)} for a request: a body without a content
+     * type is treated as urlencoded form parameters (left exactly as they are) rather than
+     * sniffed.
+     */
+    public static String formatMessageRequestBody(String contentType, String message, boolean reformat) {
+        return formatMessageFor(contentType, message, reformat, true);
+    }
+
+    private static String formatMessageFor(
+            String contentType, String message, boolean reformat, boolean request) {
         if (message == null) {
             return null;
         }
@@ -99,8 +129,11 @@ public final class PrettyPrint {
             return stripTrailingNewlines(message);
         }
         String body = message.substring(split);
-        return message.substring(0, split)
-                + (reformat ? formatBody(ContentType.styleKeyFor(contentType, body), body) : body);
+        String style =
+                request
+                        ? ContentType.styleKeyForRequestBody(contentType, body)
+                        : ContentType.styleKeyFor(contentType, body);
+        return message.substring(0, split) + (reformat ? formatBody(style, body) : body);
     }
 
     /**

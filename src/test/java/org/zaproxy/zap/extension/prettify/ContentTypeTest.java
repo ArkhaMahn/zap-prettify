@@ -103,6 +103,55 @@ class ContentTypeTest {
     }
 
     @Test
+    void requestBodyWithoutStatedTypeDefaultsToForm() {
+        assertEquals(ContentType.FORM_STYLE, ContentType.styleKeyForRequestBody(null, "{\"a\":1}"));
+        assertEquals(ContentType.FORM_STYLE, ContentType.styleKeyForRequestBody("", "{\"a\":1}"));
+        assertEquals(
+                ContentType.FORM_STYLE, ContentType.styleKeyForRequestBody("   ", "{\"a\":1}"));
+    }
+
+    @Test
+    void requestBodyWithStatedTypeUsesTheStatedType() {
+        assertEquals(
+                "text/json", ContentType.styleKeyForRequestBody("application/json", "{\"a\":1}"));
+    }
+
+    @Test
+    void requestBodyWithUndecisiveStatedTypeIsSniffed() {
+        assertEquals(
+                ContentType.PLAIN_STYLE,
+                ContentType.styleKeyForRequestBody("text/plain", "k=v&k2=v2"));
+    }
+
+    @Test
+    void unstatedRequestBodyStaysAsFormParameters() {
+        String body = "{\"a\":1,\"b\":2}";
+        String message = "POST / HTTP/1.1\nContent-Length: " + body.length() + "\n\n" + body;
+        assertEquals(message, PrettyPrint.formatMessageRequestBody(null, message, true));
+        assertEquals(body, PrettyPrint.formatPastedRequestBody(null, body));
+    }
+
+    @Test
+    void statedJsonRequestBodyIsFormatted() {
+        String body = "{\"a\":1}";
+        String message = "POST / HTTP/1.1\n\n" + body;
+        String formatted = PrettyPrint.formatMessageRequestBody("application/json", message, true);
+        assertNotEquals(message, formatted);
+        assertTrue(formatted.contains("\n\n{\n"));
+        assertTrue(TextAlignment.sameNonWhitespace(message, formatted));
+
+        String pasted = PrettyPrint.formatPastedRequestBody("application/json", body);
+        assertNotEquals(body, pasted);
+        assertTrue(TextAlignment.sameNonWhitespace(body, pasted));
+    }
+
+    @Test
+    void pastedUndecisiveRequestBodyStaysForm() {
+        String pasted = "k=v&k2=v2";
+        assertEquals(pasted, PrettyPrint.formatPastedRequestBody("text/plain", pasted));
+    }
+
+    @Test
     void pastedJsonBodyIsFormatted() {
         String pasted = "{\"a\":1,\"b\":[2,3]}";
         String formatted = PrettyPrint.formatPastedBody("application/json", pasted);
