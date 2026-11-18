@@ -110,6 +110,27 @@ public class PrettifyHttpPanelView
     /** The exact formatted text installed in the document, including the wrap breaks. */
     private volatile String displaySource = "";
 
+    /**
+     * Validation cache for the current display/raw pair. Building a {@link TextAlignment.Mapper}
+     * verifies that the two texts contain the same non-whitespace characters, a full O(message)
+     * walk; search highlights map one range per result, so rebuilding it for every result made
+     * stepping through matches quadratic. The strings are immutable and are replaced (never
+     * mutated) when the view changes, so their identity is a safe cache key.
+     */
+    private TextAlignment.Mapper cachedMapper;
+
+    private String cachedMapperDisplay;
+    private String cachedMapperRaw;
+
+    /**
+     * The raw text whose header/body separator {@link #cachedBodyStart} was found for. Highlighting
+     * one search result at a time asks for the separator per result; scanning the message for it
+     * again each time would reintroduce the quadratic cost the mapper cache removed.
+     */
+    private String cachedBodyStartRaw;
+
+    private int cachedBodyStart;
+
     /** Wrap width (in pixels) the current document was split for; -1 means "unknown". */
     private volatile int wrappedWidthPx = -1;
 
@@ -187,6 +208,22 @@ public class PrettifyHttpPanelView
 
     /** Whether a coalesced editable-gutter rebuild is already queued on the EDT. */
     private boolean editableNumberingPending;
+
+    /**
+     * The editable gutter's per-line state. Rebuilding it from the document on every keystroke read
+     * every line (one document segment per line) on the EDT; keeping the blank flags and numbers
+     * lets a normal edit update only the lines it touched.
+     */
+    private boolean[] editableLineBlank = new boolean[0];
+
+    private int[] editableLineNumbers = new int[0];
+
+    private int editableMaxNumber;
+
+    /** Lines whose blankness may have changed since the last gutter update, inclusive; -1 = none. */
+    private int editableDirtyFrom = Integer.MAX_VALUE;
+
+    private int editableDirtyTo = -1;
 
     /** One-shot check that re-validates the wrap width after a new document has been laid out. */
     private Timer installCheck;
@@ -287,6 +324,15 @@ public class PrettifyHttpPanelView
                     return size() > CHAR_WIDTH_CACHE_SIZE;
                 }
             };
+
+    /** Clears all static caches (font widths, etc.). Called on session change. */
+    static void clearStaticCaches() {
+        // CHAR_WIDTHS is an access-ordered LinkedHashMap whose get() reorders entries, so every
+        // access (including this clear) must hold the same monitor the views use.
+        synchronized (CHAR_WIDTHS) {
+            CHAR_WIDTHS.clear();
+        }
+    }
 
     public PrettifyHttpPanelView(
             String name,
@@ -728,6 +774,7 @@ public class PrettifyHttpPanelView
             String style) {
         rawText = raw;
         displaySource = split.displayText();
+        invalidateMapper();
         // The message shown last decides whether this install refreshes the session of the
         // message already shown, or whether ZAP swapped a different message into the panel.
         Message previouslyShownMessage = shownMessage;
@@ -867,6 +914,7 @@ public class PrettifyHttpPanelView
                     public void insertUpdate(DocumentEvent e) {
                         changed = true;
                         if (editable) {
+                            markEditableNumberingDirty(e);
                             scheduleEditableNumbering();
                         }
                     }
@@ -875,6 +923,7 @@ public class PrettifyHttpPanelView
                     public void removeUpdate(DocumentEvent e) {
                         changed = true;
                         if (editable) {
+                            markEditableNumberingDirty(e);
                             scheduleEditableNumbering();
                         }
                     }
@@ -934,7 +983,7 @@ public class PrettifyHttpPanelView
         }
         try {
             if (editable) {
-                return updateEditableNumbering();
+                return rebuildEditableNumbering();
             }
             gutter.setLineNumberFormatter(
                     new PrettifyLineNumberFormatter(lineNumbers, maxLineNumber));
@@ -945,48 +994,146 @@ public class PrettifyHttpPanelView
     }
 
     /**
-     * Numbers the non-blank rows of the text being edited, so the gutter keeps following the
-     * message's logical lines while the user types. Formatter-inserted blank rows stay unnumbered.
+     * Numbers the non-blank rows of the text being edited after an edit, so the gutter keeps
+     * following the message's logical lines while the user types. Formatter-inserted blank rows
+     * stay unnumbered.
+     *
+     * <p>Only the lines the document event touched are read; the rest of the numbering is reused.
+     * A full rebuild of every line on every keystroke is what made typing in a large editable
+     * message lag. When the line count changed (Enter, paste, delete of a line break) the cached
+     * arrays no longer line up, so that occasional case falls back to a full rebuild.
      */
     private int updateEditableNumbering() {
         editableNumberingPending = false;
         Gutter gutter = scrollPane.getGutter();
         if (gutter == null) {
+            editableLineNumbers = new int[0];
+            editableLineBlank = new boolean[0];
             return 1;
         }
         Document document = textArea.getDocument();
         if (document == null) {
+            editableLineNumbers = new int[0];
+            editableLineBlank = new boolean[0];
             return 1;
         }
         Element root = document.getDefaultRootElement();
         int lines = root.getElementCount();
-        int[] numbers = new int[lines];
-        int number = 0;
-        Segment segment = new Segment();
-        for (int i = 0; i < lines; i++) {
-            Element line = root.getElement(i);
-            int start = line.getStartOffset();
-            int end = Math.max(start, line.getEndOffset() - 1);
-            boolean blank = true;
-            try {
-                if (end > start) {
-                    // Reading through the document's own segment avoids copying the whole document
-                    // on every keystroke.
-                    document.getText(start, end - start, segment);
-                    for (int k = segment.offset; k < segment.offset + segment.count; k++) {
-                        if (!Character.isWhitespace(segment.array[k])) {
-                            blank = false;
-                            break;
-                        }
+        if (editableLineNumbers.length != lines || editableLineBlank.length != lines) {
+            return rebuildEditableNumbering();
+        }
+        int from = editableDirtyFrom;
+        int to = editableDirtyTo;
+        editableDirtyFrom = Integer.MAX_VALUE;
+        editableDirtyTo = -1;
+        int firstChanged = Integer.MAX_VALUE;
+        if (from <= to) {
+            int lo = Math.max(0, from);
+            int hi = Math.min(lines - 1, to);
+            Segment segment = new Segment();
+            for (int i = lo; i <= hi; i++) {
+                boolean blank = isBlankLine(document, root.getElement(i), segment);
+                if (blank != editableLineBlank[i]) {
+                    editableLineBlank[i] = blank;
+                    if (i < firstChanged) {
+                        firstChanged = i;
                     }
                 }
-            } catch (BadLocationException | RuntimeException e) {
-                blank = false;
             }
-            numbers[i] = blank ? 0 : ++number;
         }
-        gutter.setLineNumberFormatter(new PrettifyLineNumberFormatter(numbers, number));
-        return number;
+        if (firstChanged != Integer.MAX_VALUE) {
+            renumberEditableLines(firstChanged, lines);
+        }
+        gutter.setLineNumberFormatter(
+                new PrettifyLineNumberFormatter(editableLineNumbers, editableMaxNumber));
+        return editableMaxNumber;
+    }
+
+    /** Rebuilds the editable gutter arrays from the document, for an install or a line-count change. */
+    private int rebuildEditableNumbering() {
+        editableNumberingPending = false;
+        editableDirtyFrom = Integer.MAX_VALUE;
+        editableDirtyTo = -1;
+        Gutter gutter = scrollPane.getGutter();
+        if (gutter == null) {
+            editableLineNumbers = new int[0];
+            editableLineBlank = new boolean[0];
+            return 1;
+        }
+        Document document = textArea.getDocument();
+        if (document == null) {
+            editableLineNumbers = new int[0];
+            editableLineBlank = new boolean[0];
+            return 1;
+        }
+        Element root = document.getDefaultRootElement();
+        int lines = root.getElementCount();
+        if (editableLineBlank.length != lines) {
+            editableLineBlank = new boolean[lines];
+        }
+        if (editableLineNumbers.length != lines) {
+            editableLineNumbers = new int[lines];
+        }
+        Segment segment = new Segment();
+        for (int i = 0; i < lines; i++) {
+            editableLineBlank[i] = isBlankLine(document, root.getElement(i), segment);
+        }
+        renumberEditableLines(0, lines);
+        gutter.setLineNumberFormatter(
+                new PrettifyLineNumberFormatter(editableLineNumbers, editableMaxNumber));
+        return editableMaxNumber;
+    }
+
+    /** Recomputes the numbers of {@code [from, lines)} from the cached blank flags. */
+    private void renumberEditableLines(int from, int lines) {
+        int number = from == 0 ? 0 : editableLineNumbers[from - 1];
+        for (int i = from; i < lines; i++) {
+            editableLineNumbers[i] = editableLineBlank[i] ? 0 : ++number;
+        }
+        editableMaxNumber = number;
+    }
+
+    /**
+     * Whether a logical line is blank. Reads through the document's own segment instead of copying
+     * the text, and treats an unreadable line as non-blank like the old full rebuild did.
+     */
+    private static boolean isBlankLine(Document document, Element line, Segment segment) {
+        int start = line.getStartOffset();
+        int end = Math.max(start, line.getEndOffset() - 1);
+        if (end <= start) {
+            return true;
+        }
+        try {
+            document.getText(start, end - start, segment);
+            for (int k = segment.offset; k < segment.offset + segment.count; k++) {
+                if (!Character.isWhitespace(segment.array[k])) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (BadLocationException | RuntimeException e) {
+            return false;
+        }
+    }
+
+    /** Notes the lines a document event can have made blank or non-blank. */
+    private void markEditableNumberingDirty(DocumentEvent e) {
+        Document document = e.getDocument();
+        if (document == null) {
+            return;
+        }
+        Element root = document.getDefaultRootElement();
+        int length = document.getLength();
+        int startOffset = Math.min(Math.max(0, e.getOffset()), length);
+        int endOffset = Math.min(length, startOffset + e.getLength());
+        int from = root.getElementIndex(startOffset);
+        int to = root.getElementIndex(Math.max(0, endOffset));
+        if (from < editableDirtyFrom) {
+            editableDirtyFrom = from;
+        }
+        if (to > editableDirtyTo) {
+            editableDirtyTo = to;
+        }
     }
 
     /**
@@ -1502,7 +1649,17 @@ public class PrettifyHttpPanelView
         String edited = textArea.getText();
         String raw = rawText;
         String display = displaySource;
-        String newRaw = TextAlignment.applyEditToRaw(raw, display, edited);
+        // Create a mapper once for the display/raw pair; applying the edit then maps the changed
+        // range with the mapper's forward cursors instead of rescanning both texts from the start.
+        TextAlignment.Mapper mapper = mapperFor(display, raw);
+        String newRaw;
+        if (mapper != null) {
+            synchronized (mapper) {
+                newRaw = TextAlignment.applyEditToRaw(raw, display, edited, mapper);
+            }
+        } else {
+            newRaw = edited;
+        }
         if (newRaw == null) {
             newRaw = edited;
         }
@@ -1531,6 +1688,7 @@ public class PrettifyHttpPanelView
         // keep the two in step (a reinstall would do it, but a body view keeps its document).
         textArea.setMessageText(rawText);
         displaySource = edited;
+        invalidateMapper();
         rememberBody();
         // The body is in the message being saved now, so the request gets the content type it
         // has. This is the only path that writes the header: showing or refreshing the editable
@@ -1648,11 +1806,13 @@ public class PrettifyHttpPanelView
         if (data == null) {
             data = "";
         }
-        if (data.equals(rawText)
+        Message message = model.getMessage();
+        boolean sameMessage = message == shownMessage;
+        boolean sameData = data.equals(rawText);
+        if (sameData && sameMessage
                 && editable
                 && sessionDocument != null
-                && textArea.getDocument() == sessionDocument
-                && model.getMessage() == shownMessage) {
+                && textArea.getDocument() == sessionDocument) {
             // The model still holds the text the session document shows, and shows the message
             // the session is about. The view is refreshed with what it shows anyway (like the
             // plain text views re-read their document on every notification); when the text is
@@ -1666,7 +1826,85 @@ public class PrettifyHttpPanelView
             rememberBody();
             return;
         }
+        // The message actually changed (different message object). Clear per-view caches so the
+        // old message's large strings/documents can be GC'd. If it's the same message with
+        // different data (e.g., a header mutation), keep the caches - they will be invalidated
+        // by the key mismatch in prepareAndInstall.
+        if (!sameMessage) {
+            clearPerViewCaches();
+        }
         update();
+    }
+
+    /**
+     * Returns a mapper for the display/raw pair, reusing the cached validation when the pair is the
+     * one that was last mapped. The mapper itself keeps mutable forward cursors, so callers that
+     * use it outside a single method must synchronize on it.
+     */
+    private TextAlignment.Mapper mapperFor(String display, String raw) {
+        synchronized (this) {
+            if (cachedMapperDisplay == display && cachedMapperRaw == raw) {
+                return cachedMapper;
+            }
+            TextAlignment.Mapper mapper = TextAlignment.mapper(display, raw);
+            cachedMapper = mapper;
+            cachedMapperDisplay = display;
+            cachedMapperRaw = raw;
+            return mapper;
+        }
+    }
+
+    /** Drops the mapper validation cache (the display/raw pair is changing). */
+    private synchronized void invalidateMapper() {
+        cachedMapper = null;
+        cachedMapperDisplay = null;
+        cachedMapperRaw = null;
+        cachedBodyStartRaw = null;
+    }
+
+    /**
+     * Offset of the body in the raw LF text, cached for the current raw string. The search path
+     * needs it for every result in an All view; the scan is linear in the message.
+     */
+    private int bodyStartFor(String raw) {
+        synchronized (this) {
+            if (cachedBodyStartRaw == raw) {
+                return cachedBodyStart;
+            }
+            int start = bodyStartInLf(raw);
+            cachedBodyStartRaw = raw;
+            cachedBodyStart = start;
+            return start;
+        }
+    }
+
+    /** Clears per-view cached artifacts (split, document, line numbers, projection) so the old
+     * message's data can be garbage collected. Called when the message changes. */
+    private void clearPerViewCaches() {
+        invalidateMapper();
+        cachedSplit = null;
+        splitDocument = null;
+        splitLineNumbers = null;
+        splitNumbering = null;
+        splitStyle = null;
+        splitDisplay = null;
+        projectionRaw = null;
+        projectionDisplay = null;
+        projectionType = "";
+        // splitWidthPx, splitWrapped, splitMaxLineNumber are primitives, no need to clear.
+        // lastShownBody, lastShownQuery, lastShownMessage, lastShownMethod are for the body/
+        // query round-trip fix and should persist across renders of the same message, but not
+        // across different messages.
+        lastShownMessage = null;
+        lastShownBody = "";
+        lastShownQuery = "";
+        lastShownMethod = "";
+        // The editable gutter arrays belong to the old document; the next install rebuilds them.
+        editableLineBlank = new boolean[0];
+        editableLineNumbers = new int[0];
+        editableMaxNumber = 0;
+        editableDirtyFrom = Integer.MAX_VALUE;
+        editableDirtyTo = -1;
     }
 
     /**
@@ -1705,7 +1943,7 @@ public class PrettifyHttpPanelView
                 httpMessage.getRequestBody() == null
                         ? ""
                         : httpMessage.getRequestBody().toString();
-        if (body.trim().isEmpty()) {
+        if (body.isBlank()) {
             return false;
         }
         String contentType = ContentType.contentTypeFor(ContentType.sniff(body));
@@ -1923,7 +2161,13 @@ public class PrettifyHttpPanelView
         // The HTTP panel models normalise CRLF to LF, so the displayed text, the raw message and
         // the search offsets all use LF. No header/body CRLF conversion is applied: converting the
         // offsets back and forth was what added line endings the message never had.
-        String display = textArea.getText();
+        // A read-only view's document is exactly displaySource, so reading it back is an avoidable
+        // full copy per search. An editable view may have unsaved text, so it is read from the
+        // document.
+        String display = editable ? textArea.getText() : displaySource;
+        if (display == null) {
+            display = textArea.getText();
+        }
         String raw = rawText;
         if (raw == null) {
             raw = model.getData();
@@ -1931,7 +2175,8 @@ public class PrettifyHttpPanelView
         if (raw == null) {
             raw = display;
         }
-        TextAlignment.Mapper mapper = TextAlignment.mapper(display, raw);
+        TextAlignment.Mapper mapper =
+                editable ? TextAlignment.mapper(display, raw) : mapperFor(display, raw);
         if (mapper == null) {
             // The view is showing something that does not align with the raw message (for example
             // while a new document is being prepared); report the matches as they are.
@@ -1940,25 +2185,27 @@ public class PrettifyHttpPanelView
         }
         boolean combined = target == Target.REQUEST_ALL || target == Target.RESPONSE_ALL;
         // The separator is the same for every match, so find it once instead of once per match.
-        int bodyStart = combined ? bodyStartInLf(raw) : 0;
+        int bodyStart = combined ? bodyStartFor(raw) : 0;
         Matcher matcher = pattern.matcher(display);
-        while (matcher.find()) {
-            int start = mapper.displayToRaw(matcher.start());
-            int end = mapper.displayToRawEnd(matcher.end());
-            if (start < 0 || end < 0 || start >= end) {
-                continue;
-            }
-            SearchMatch.Location location = locationFor(start, bodyStart);
-            if (location == null) {
-                continue;
-            }
-            if (isHeaderLocation(location)) {
-                int headerEnd = combined ? bodyStart : raw.length();
-                int clampedEnd = Math.min(end, headerEnd);
-                matches.add(new SearchMatch(location, start, clampedEnd));
-            } else {
-                matches.add(
-                        new SearchMatch(location, start - bodyStart, end - bodyStart));
+        synchronized (mapper) {
+            while (matcher.find()) {
+                int start = mapper.displayToRaw(matcher.start());
+                int end = mapper.displayToRawEnd(matcher.end());
+                if (start < 0 || end < 0 || start >= end) {
+                    continue;
+                }
+                SearchMatch.Location location = locationFor(start, bodyStart);
+                if (location == null) {
+                    continue;
+                }
+                if (isHeaderLocation(location)) {
+                    int headerEnd = combined ? bodyStart : raw.length();
+                    int clampedEnd = Math.min(end, headerEnd);
+                    matches.add(new SearchMatch(location, start, clampedEnd));
+                } else {
+                    matches.add(
+                            new SearchMatch(location, start - bodyStart, end - bodyStart));
+                }
             }
         }
     }
@@ -2004,7 +2251,7 @@ public class PrettifyHttpPanelView
                 sourceStart = start;
                 sourceEnd = end;
                 if (target == Target.REQUEST_ALL || target == Target.RESPONSE_ALL) {
-                    int bodyStart = bodyStartInLf(raw);
+                    int bodyStart = bodyStartFor(raw);
                     sourceStart += bodyStart;
                     sourceEnd += bodyStart;
                 }
@@ -2012,12 +2259,16 @@ public class PrettifyHttpPanelView
             default:
                 return;
         }
-        TextAlignment.Mapper mapper = TextAlignment.mapper(display, raw);
+        TextAlignment.Mapper mapper = mapperFor(display, raw);
         if (mapper == null) {
             return;
         }
-        int displayStart = mapper.rawToDisplay(sourceStart);
-        int displayEnd = mapper.rawToDisplayEnd(sourceEnd);
+        int displayStart;
+        int displayEnd;
+        synchronized (mapper) {
+            displayStart = mapper.rawToDisplay(sourceStart);
+            displayEnd = mapper.rawToDisplayEnd(sourceEnd);
+        }
         if (displayStart < 0 || displayEnd < 0 || displayStart >= displayEnd) {
             return;
         }

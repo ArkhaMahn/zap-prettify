@@ -698,13 +698,13 @@ public final class PrettyPrint {
                 e = (e < 0) ? n : e + 1;
                 addOther(pieces, lt, e);
                 i = e;
-            } else if (!isTagStart(s, lt)) {
-                // A stray '<' in text rather than a tag start.
-                addText(pieces, lt, lt + 1);
-                i = lt + 1;
             } else {
+                // Compute the tag end once; the old isTagStart() + findTagEnd() pair scanned the
+                // same tag twice for every letter-initial tag, which is the common case.
                 int e = findTagEnd(s, lt);
-                if (e < 0) {
+                char after = (lt + 1 < n) ? s.charAt(lt + 1) : 0;
+                if (e < 0 || (after != '/' && !Character.isLetter(after))) {
+                    // A stray '<' in text (or a truncated tag) rather than a tag start.
                     addText(pieces, lt, lt + 1);
                     i = lt + 1;
                     continue;
@@ -757,8 +757,16 @@ public final class PrettyPrint {
 
     private static int indexOfIgnoreCase(String s, String needle, int from) {
         int limit = s.length() - needle.length();
+        // regionMatches() compares every glyph along the needle, so calling it at every offset is
+        // an order of magnitude slower than testing the (very selective) first glyph first. The
+        // closing tags this searches for start with '<', which is rare in script/style bodies.
+        char first = needle.charAt(0);
+        char firstLower = Character.toLowerCase(first);
+        char firstUpper = Character.toUpperCase(first);
         for (int i = Math.max(0, from); i <= limit; i++) {
-            if (s.regionMatches(true, i, needle, 0, needle.length())) {
+            char c = s.charAt(i);
+            if ((c == firstLower || c == firstUpper)
+                    && s.regionMatches(true, i, needle, 0, needle.length())) {
                 return i;
             }
         }
@@ -812,21 +820,6 @@ public final class PrettyPrint {
             }
         }
         return -1;
-    }
-
-    private static boolean isTagStart(String s, int lt) {
-        int n = s.length();
-        if (lt + 1 >= n) {
-            return false;
-        }
-        char c = s.charAt(lt + 1);
-        if (c == '/' || c == '!' || c == '?') {
-            return true;
-        }
-        if (!Character.isLetter(c)) {
-            return false;
-        }
-        return findTagEnd(s, lt) >= 0;
     }
 
     private static int firstWs(String s) {

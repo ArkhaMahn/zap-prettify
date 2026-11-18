@@ -83,6 +83,50 @@ class PrettifyHttpPanelViewTest {
     }
 
     @Test
+    void editableGutterNumbersFollowBlankLinesAndEdits() throws Exception {
+        HttpMessage message = new HttpMessage(new HttpRequestHeader(HEADER));
+        message.setRequestBody("{\"a\":1,\"b\":2}");
+        BodyModel model = new BodyModel();
+        model.setMessage(message);
+
+        PrettifyHttpPanelView view =
+                new PrettifyHttpPanelView(
+                        "test", "test", null, PrettifyHttpPanelView.Target.REQUEST_BODY, model);
+        PrettifyTextArea area = textAreaOf(view);
+        waitUntil(() -> !area.getText().isEmpty());
+        Document readOnlyDocument = area.getDocument();
+        SwingUtilities.invokeAndWait(() -> view.setEditable(true));
+        waitUntil(() -> area.getDocument() != readOnlyDocument);
+        waitUntil(() -> "1,2,3,4".equals(numberingOf(view, 4)));
+
+        // Inserting a line break changes the line count: the formatter rebuilds, and the new blank
+        // line stays unnumbered while the lines after it shift down.
+        SwingUtilities.invokeAndWait(
+                () -> {
+                    area.setCaretPosition(area.getText().indexOf('\n') + 1);
+                    area.replaceSelection("\n");
+                });
+        waitUntil(() -> "1,,2,3,4".equals(numberingOf(view, 5)));
+
+        // Typing on that line does not change the line count: only the edited line is re-read, and
+        // the numbers after it move up. Deleting the text moves them back down.
+        SwingUtilities.invokeAndWait(
+                () -> {
+                    area.setCaretPosition(area.getText().indexOf("\n\n") + 1);
+                    area.replaceSelection("x");
+                });
+        waitUntil(() -> "1,2,3,4,5".equals(numberingOf(view, 5)));
+        SwingUtilities.invokeAndWait(
+                () -> {
+                    int x = area.getText().indexOf('x');
+                    area.setSelectionStart(x);
+                    area.setSelectionEnd(x + 1);
+                    area.replaceSelection("");
+                });
+        waitUntil(() -> "1,,2,3,4".equals(numberingOf(view, 5)));
+    }
+
+    @Test
     void addingAHeaderInTheAllViewKeepsItOnItsOwnLineAndInOrder() throws Exception {
         String header =
                 "POST http://example.com/ HTTP/1.1\r\n"
@@ -1339,8 +1383,7 @@ class PrettifyHttpPanelViewTest {
         }
     }
 
-    /**
-     * The gutter formatter read on the EDT. Every install re-creates it, so its identity is the
+    /** The gutter formatter read on the EDT. Every install re-creates it, so its identity is the
      * observable heartbeat of an install - also the heartbeat of a reuse render whose document
      * (and text) stay the same.
      */
@@ -1364,6 +1407,30 @@ class PrettifyHttpPanelViewTest {
             throw new IllegalStateException(e.getCause());
         }
         return formatter[0];
+    }
+
+    /** The gutter numbers of {@code lines} rows, read on the EDT where the formatter is updated. */
+    private static String numberingOf(PrettifyHttpPanelView view, int lines) {
+        String[] numbers = new String[lines];
+        Runnable read =
+                () -> {
+                    LineNumberFormatter formatter = formatterOf(view);
+                    for (int i = 0; i < lines; i++) {
+                        numbers[i] = formatter.format(i + 1);
+                    }
+                };
+        if (SwingUtilities.isEventDispatchThread()) {
+            read.run();
+        } else {
+            try {
+                SwingUtilities.invokeAndWait(read);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (java.lang.reflect.InvocationTargetException e) {
+                throw new IllegalStateException(e.getCause());
+            }
+        }
+        return String.join(",", numbers);
     }
 
     /**

@@ -67,6 +67,14 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
     /** Any line state at or below this value is an encoded body state. */
     static final int BODY_DETECT = -11_000_000;
 
+    /**
+     * Longest Content-Type value captured for body-delegate selection. The value only needs its
+     * type/subtype (everything before the ';'), so a pathological or hostile header cannot make the
+     * accumulator grow without bound (a continuation row of a wrapped header would otherwise append
+     * the whole value again into the builder).
+     */
+    private static final int MAX_CONTENT_TYPE_CHARS = 512;
+
     private final boolean response;
     private final boolean headersOnly;
 
@@ -83,10 +91,13 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
     private boolean bodyResolved;
     private String bodyStyleKey;
 
+    /** Cache of {@code "body:" + bodyStyleKey}; see {@link #bodyCacheContext()}. */
+    private String bodyCacheContext;
+
     /**
      * The content type changed since the body delegate was resolved, so a decisive new type
      * supersedes it. Set by {@link #finalizeContentType()}, consumed by
-     * {@link #getBodyTokenMaker(Segment)}.
+     * {@link #resolveBodyDelegate(Segment)}.
      */
     private boolean bodyContentTypeStale;
 
@@ -316,8 +327,9 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
                 p++;
             }
             emit(ws, p - 1, TokenTypes.WHITESPACE);
-            if (contentTypeHeader && p < end) {
-                contentTypeValue.append(arr, p, end - p);
+            if (contentTypeHeader && p < end && contentTypeValue.length() < MAX_CONTENT_TYPE_CHARS) {
+                int take = Math.min(end - p, MAX_CONTENT_TYPE_CHARS - contentTypeValue.length());
+                contentTypeValue.append(arr, p, take);
             }
             emit(p, end - 1, PrettifyTokenTypes.HTTP_HEADER_VALUE);
             return S_HDR_VALUE;
@@ -493,9 +505,13 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
      * Identity of the resolved body delegate, used to key the splitter's per-line token cache, or
      * null while the headers (and therefore the delegate) are still being read. Plain bodies are not
      * cached because they are cheap to tokenize.
+     *
+     * <p>The value is computed once when the delegate is (re)resolved: the splitter asks for it on
+     * every body line, and rebuilding the {@code "body:" + style} string there would allocate once
+     * per line of a large body.
      */
     String bodyCacheContext() {
-        return bodyResolved && bodyTokenMaker != null ? "body:" + bodyStyleKey : null;
+        return bodyCacheContext;
     }
 
     /** Whether the resolved body delegate is a script token maker (JavaScript or TypeScript). */
@@ -522,6 +538,7 @@ public abstract class HttpTokenMaker extends AbstractTokenMaker {
             bodyTokenMaker = new ContinuedStringTokenMaker(
                     PrettifyTokenMakerFactory.bodyTokenMaker(styleKey));
         }
+        bodyCacheContext = bodyTokenMaker != null ? "body:" + styleKey : null;
         return changed;
     }
 

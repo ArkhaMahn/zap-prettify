@@ -27,17 +27,15 @@ public class FormUrlEncodedTokenMaker extends AbstractTokenMaker {
 
         while (p < end) {
             if (!expectValue) {
-                int eq = indexOf(a, '=', p, end);
-                int amp = indexOf(a, '&', p, end);
-                int stop = end;
-                int kind = 0;
-                if (eq >= 0 && (amp < 0 || eq < amp)) {
-                    stop = eq;
-                    kind = 1;
-                } else if (amp >= 0) {
-                    stop = amp;
-                    kind = 2;
+                // Find the next '=' or '&' in one pass. Scanning separately for each made a
+                // parameter list without any value ("a&b&c&...") quadratic: every '&' segment
+                // rescanned the whole rest of the line looking for a '=' that was not there.
+                int q = p;
+                while (q < end && a[q] != '=' && a[q] != '&') {
+                    q++;
                 }
+                int stop = q;
+                int kind = q == end ? 0 : (a[q] == '=' ? 1 : 2);
                 if (stop > p) {
                     addToken(
                             a,
@@ -47,12 +45,12 @@ public class FormUrlEncodedTokenMaker extends AbstractTokenMaker {
                             startOffset + (p - off));
                 }
                 if (kind == 1) {
-                    addToken(a, eq, eq, TokenTypes.OPERATOR, startOffset + (eq - off));
-                    p = eq + 1;
+                    addToken(a, q, q, TokenTypes.OPERATOR, startOffset + (q - off));
+                    p = q + 1;
                     expectValue = true;
                 } else if (kind == 2) {
-                    addToken(a, amp, amp, TokenTypes.SEPARATOR, startOffset + (amp - off));
-                    p = amp + 1;
+                    addToken(a, q, q, TokenTypes.SEPARATOR, startOffset + (q - off));
+                    p = q + 1;
                 } else {
                     p = end;
                 }

@@ -318,6 +318,39 @@ class DisplayTextSplitterTest {
                 "per-character recorded types agree between the wrap-aware and chunked split");
     }
 
+    @Test
+    void shiftOffsetsKeepsThePrefixAndMovesOnlyTheSuffix() {
+        int[] offsets = {2, 5, 9, 12};
+        assertArrayEquals(
+                new int[] {2, 5, 9, 12},
+                DisplayTextSplitter.shiftOffsets(offsets, 7, 0, 0),
+                "an empty edit changes nothing");
+        assertArrayEquals(
+                new int[] {2, 5, 10, 13},
+                DisplayTextSplitter.shiftOffsets(offsets, 7, 0, 1),
+                "an insertion moves offsets at or after it");
+        assertArrayEquals(
+                new int[] {2, 5, 7, 10},
+                DisplayTextSplitter.shiftOffsets(offsets, 7, 2, 0),
+                "a removal drops offsets inside it and moves the rest");
+        assertArrayEquals(
+                new int[] {2, 5, 9},
+                DisplayTextSplitter.shiftOffsets(offsets, 7, 5, 2),
+                "a replaced range keeps only offsets outside it");
+        assertArrayEquals(
+                new int[] {},
+                DisplayTextSplitter.shiftOffsets(offsets, 0, 20, 0),
+                "removing everything leaves no offsets");
+        assertArrayEquals(
+                new int[] {6, 8},
+                DisplayTextSplitter.shiftOffsets(new int[] {5, 7}, 5, 0, 1),
+                "an offset exactly at the insertion moves");
+        assertArrayEquals(
+                new int[] {6, 6},
+                DisplayTextSplitter.shiftOffsets(new int[] {5, 5}, 5, 0, 1),
+                "duplicate boundaries all move");
+    }
+
     /**
      * The recorded type for every offset of the original text, zero outside any span. No leading
      * whitespace in the input: a wrap continuation row copies its line's indent onto itself, and

@@ -76,6 +76,28 @@ class HttpTokenMakerTest {
         assertFirstMeaningfulTokenIs(json, TokenTypes.SEPARATOR);
     }
 
+    @Test
+    void unvaluedFormParametersKeepTheirTypes() {
+        FormUrlEncodedTokenMaker tm = new FormUrlEncodedTokenMaker();
+        String body = "a&b=c&d";
+        char[] arr = body.toCharArray();
+        Token t = tm.getTokenList(new Segment(arr, 0, arr.length), 0, 0);
+        List<String> actual = new ArrayList<>();
+        for (Token x = t; x != null && x.length() > 0; x = x.getNextToken()) {
+            actual.add(x.getType() + ":" + x.getLexeme());
+        }
+        assertEquals(
+                List.of(
+                        PrettifyTokenTypes.HTTP_PARAMETER_NAME + ":a",
+                        TokenTypes.SEPARATOR + ":&",
+                        PrettifyTokenTypes.HTTP_PARAMETER_NAME + ":b",
+                        TokenTypes.OPERATOR + ":=",
+                        PrettifyTokenTypes.HTTP_PARAMETER_VALUE + ":c",
+                        TokenTypes.SEPARATOR + ":&",
+                        PrettifyTokenTypes.HTTP_PARAMETER_NAME + ":d"),
+                actual);
+    }
+
     /**
      * Tokenizes every line through one token maker, carrying the state each line leaves as the
      * document does ({@link HttpTokenMaker#resetAfterLine}), and returns the last line's tokens.

@@ -631,7 +631,9 @@ public class PrettifyDocument extends RSyntaxDocument {
             line = count - 1;
         }
         if (lineState.length < count) {
-            int[] grown = new int[count];
+            // Grow geometrically: inserting newlines one at a time otherwise reallocates and copies
+            // the whole state array on every line, which is quadratic over a large multi-line edit.
+            int[] grown = new int[Math.max(count, Math.max(16, lineState.length * 2))];
             System.arraycopy(lineState, 0, grown, 0, lineState.length);
             lineState = grown;
         }

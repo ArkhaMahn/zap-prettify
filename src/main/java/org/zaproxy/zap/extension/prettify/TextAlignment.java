@@ -491,4 +491,143 @@ public final class TextAlignment {
     private static int clamp(int value, int min, int max) {
         return Math.max(min, Math.min(max, value));
     }
+
+    /**
+     * Applies the change the user made in the formatted text to the raw message text, using a
+     * pre-validated {@link Mapper} for O(1) amortized offset mapping. This is faster than the
+     * static variant when the same raw/formatted pair is used repeatedly (e.g., during a save
+     * operation that maps multiple ranges).
+     *
+     * @param raw the raw message text
+     * @param formatted the formatted (display) text as it was before the edit
+     * @param edited the edited display text
+     * @param mapper a validated mapper for the formatted/raw pair, or {@code null} to validate
+     * @return the raw text with the edit applied, or {@code edited} if the texts are not
+     *         whitespace-equivalent
+     */
+    public static String applyEditToRaw(
+            String raw, String formatted, String edited, Mapper mapper) {
+        if (raw == null || edited == null || formatted == null) {
+            return edited;
+        }
+        if (formatted.equals(edited)) {
+            return raw;
+        }
+        if (formatted.equals(raw)) {
+            return edited;
+        }
+        if (raw.startsWith(formatted) && stripTrailingNewlines(raw).equals(formatted)) {
+            // The only difference is the trailing newline(s) the view hides (a header terminator):
+            // keep them and apply the edit at the same offsets. If the edit has supplied a blank
+            // line of its own, that line is now the header/body separator; appending the hidden
+            // terminator would push those newlines into the new body.
+            return hasBlankLine(edited) ? edited : edited + raw.substring(formatted.length());
+        }
+        // Validate or reuse the mapper. The identity check keeps the common caller (which built
+        // the mapper for these exact strings) from re-walking the texts, while a mapper built for
+        // another pair is rejected rather than silently used.
+        if (mapper == null || mapper.display != formatted || mapper.raw != raw) {
+            mapper = mapper(formatted, raw);
+            if (mapper == null) {
+                return edited;
+            }
+        }
+        // The rest of the logic mirrors the static variant but uses the mapper for offset mapping.
+        // A difference in whitespace only is still a user edit (indentation or a line break the
+        // user typed), so it is applied to the raw text like any other change.
+        int limit = Math.min(formatted.length(), edited.length());
+        int prefix = 0;
+        while (prefix < limit && formatted.charAt(prefix) == edited.charAt(prefix)) {
+            prefix++;
+        }
+        int suffix = 0;
+        while (suffix < limit - prefix
+                && formatted.charAt(formatted.length() - 1 - suffix)
+                        == edited.charAt(edited.length() - 1 - suffix)) {
+            suffix++;
+        }
+
+        int formattedStart = prefix;
+        int formattedEnd = formatted.length() - suffix;
+        String replacement = edited.substring(formattedStart, edited.length() - suffix);
+
+        if (formattedStart == formattedEnd) {
+            // A pure insertion at a whitespace boundary (for example a new header typed on the
+            // blank line that separates the headers from a formatted body). Mapping the boundary
+            // to "just after the previous non-whitespace character" would put the text before the
+            // newline and glue it to the previous header, so map the whitespace position itself.
+            int rawAt = mapOffset(formatted, raw, formattedStart, mapper);
+            return raw.substring(0, rawAt) + replacement + raw.substring(rawAt);
+        }
+
+        int before = mapper.countDisplayTo(formattedStart);
+        int after = mapper.countDisplayTo(formattedEnd);
+
+        boolean startsOnCharacter =
+                formattedStart < formatted.length()
+                        && !isWhitespace(formatted.charAt(formattedStart));
+        int rawStart =
+                startsOnCharacter
+                        ? mapper.rawIndexOf(before + 1)
+                        : mapper.rawAfter(before);
+
+        int rawEnd;
+        if (formattedEnd == formattedStart) {
+            rawEnd = rawStart;
+        } else if (!isWhitespace(formatted.charAt(formattedEnd - 1))) {
+            rawEnd = mapper.rawAfter(after);
+        } else {
+            rawEnd = mapper.rawIndexOf(after + 1);
+        }
+        if (rawStart < 0 || rawEnd < rawStart || rawEnd > raw.length()) {
+            return edited;
+        }
+
+        if (rawStart == rawEnd && replacement.isEmpty()) {
+            return raw;
+        }
+        return raw.substring(0, rawStart) + replacement + raw.substring(rawEnd);
+    }
+
+    /**
+     * Maps an offset between two texts that contain the same non-whitespace characters, using a
+     * pre-validated {@link Mapper}. A position on a character maps to that character; a position
+     * inside a whitespace run keeps the same relative position when the runs are identical, and
+     * otherwise follows the same line break.
+     */
+    private static int mapOffset(String from, String to, int offset, Mapper mapper) {
+        int at = clamp(offset, 0, from.length());
+        int before = mapper.countDisplayTo(at);
+        if (at < from.length() && !isWhitespace(from.charAt(at))) {
+            return mapper.rawIndexOf(before + 1);
+        }
+        int fromStart = mapper.displayAfter(before);
+        int fromEnd = mapper.displayIndexOf(before + 1);
+        int toStart = mapper.rawAfter(before);
+        int toEnd = mapper.rawIndexOf(before + 1);
+        int within = clamp(at, fromStart, fromEnd) - fromStart;
+        String fromGap = from.substring(fromStart, fromEnd);
+        String toGap = to.substring(toStart, toEnd);
+        if (fromGap.equals(toGap)) {
+            return toStart + within;
+        }
+        // The projection changed this run's whitespace. Keep the position after the same line
+        // break so an edit in a re-indented body still lands on the line the user changed.
+        int lineBreaks = 0;
+        for (int i = 0; i < within; i++) {
+            if (fromGap.charAt(i) == '\n') {
+                lineBreaks++;
+            }
+        }
+        if (lineBreaks == 0) {
+            return toStart;
+        }
+        int seen = 0;
+        for (int i = 0; i < toGap.length(); i++) {
+            if (toGap.charAt(i) == '\n' && ++seen == lineBreaks) {
+                return toStart + i + 1;
+            }
+        }
+        return toEnd;
+    }
 }

@@ -1,11 +1,13 @@
 package org.zaproxy.zap.extension.prettify;
 
+import java.util.function.Supplier;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.parosproxy.paros.Constant;
 import org.parosproxy.paros.extension.ExtensionAdaptor;
 import org.parosproxy.paros.extension.ExtensionHook;
-import java.util.function.Supplier;
+import org.parosproxy.paros.extension.SessionChangedListener;
+import org.parosproxy.paros.model.Session;
 import org.zaproxy.zap.extension.httppanel.component.split.request.RequestSplitComponent;
 import org.zaproxy.zap.extension.httppanel.view.AbstractStringHttpPanelViewModel;
 import org.zaproxy.zap.extension.httppanel.view.HttpPanelView;
@@ -21,7 +23,7 @@ import org.zaproxy.zap.view.HttpPanelManager;
  * Prettify add-on: adds a syntax-highlighted "Pretty" view to the request and response panels of
  * ZAP.
  */
-public class ExtensionPrettify extends ExtensionAdaptor {
+public class ExtensionPrettify extends ExtensionAdaptor implements SessionChangedListener {
 
     private static final Logger LOGGER = LogManager.getLogger(ExtensionPrettify.class);
 
@@ -71,6 +73,8 @@ public class ExtensionPrettify extends ExtensionAdaptor {
     @Override
     public void hook(ExtensionHook extensionHook) {
         super.hook(extensionHook);
+        // Register for session lifecycle so we can clear caches when the session changes.
+        extensionHook.addSessionListener(this);
         if (getView() == null) {
             return;
         }
@@ -127,6 +131,30 @@ public class ExtensionPrettify extends ExtensionAdaptor {
     @Override
     public boolean canUnload() {
         return true;
+    }
+
+    @Override
+    public void sessionChanged(Session session) {
+        // Clear process-wide caches so data from the old session is not retained.
+        DisplayTextSplitter.clearCache();
+        PrettifyHttpPanelView.clearStaticCaches();
+        PrettifyExecutor.shutdown(); // Recreated on demand with fresh threads.
+    }
+
+    @Override
+    public void sessionAboutToChange(Session session) {
+        // Same cleanup as sessionChanged.
+        sessionChanged(session);
+    }
+
+    @Override
+    public void sessionScopeChanged(Session session) {
+        // No action needed for scope changes.
+    }
+
+    @Override
+    public void sessionModeChanged(org.parosproxy.paros.control.Control.Mode mode) {
+        // No action needed for mode changes.
     }
 
     @Override
@@ -199,6 +227,7 @@ public class ExtensionPrettify extends ExtensionAdaptor {
         // Clear the cache after stopping the workers so a finishing split cannot immediately
         // repopulate it.
         DisplayTextSplitter.clearCache();
+        PrettifyHttpPanelView.clearStaticCaches();
     }
 
     /** Runs one removal, logging and continuing on failure so unload cannot stop half-way. */

@@ -271,4 +271,50 @@ class TextAlignmentTest {
         assertNull(TextAlignment.mapper(RAW_JSON, RAW_JSON.replace("1", "9")));
         assertNull(TextAlignment.mapper(null, RAW_JSON));
     }
+
+    @Test
+    void mapperOverloadMatchesTheStaticVariant() {
+        assertMapperOverloadMatches(
+                RAW_JSON,
+                FORMATTED_JSON,
+                FORMATTED_JSON,
+                FORMATTED_JSON.replace("\"a\": 1", "\"a\": 9"),
+                FORMATTED_JSON.replace("\"b\"", "\"c\""),
+                FORMATTED_JSON.replace("\"b\": 2", ""),
+                FORMATTED_JSON.replace("  ", "    "),
+                FORMATTED_JSON.replace("\"a\": 1,", "\"a\": 1,\n  "));
+
+        String rawHeader = "GET / HTTP/1.1\nHost: example.com\n\n";
+        String formattedHeader = "GET / HTTP/1.1\nHost: example.com";
+        assertMapperOverloadMatches(
+                rawHeader, formattedHeader, formattedHeader + "X");
+        assertMapperOverloadMatches(
+                rawHeader,
+                formattedHeader,
+                "GET / HTTP/1.1\nHost:  example.com");
+        assertMapperOverloadMatches(
+                rawHeader, formattedHeader, formattedHeader + "\n\ntext");
+        assertMapperOverloadMatches(
+                rawHeader, formattedHeader, formattedHeader + "\r\n\r\ntext");
+        assertMapperOverloadMatches(
+                rawHeader, formattedHeader, formattedHeader + "\n\n");
+
+        // A pure insertion inside a whitespace run whose length differs between the two texts:
+        // the raw header uses CRLF while the formatted one uses LF.
+        String rawCrlf = "A: b\r\nC: d\r\n\r\n";
+        String formattedLf = "A: b\nC: d";
+        assertMapperOverloadMatches(rawCrlf, formattedLf, "A: b \nC: d");
+        assertMapperOverloadMatches(rawCrlf, formattedLf, "A: b\nX: y\nC: d");
+    }
+
+    private static void assertMapperOverloadMatches(
+            String raw, String formatted, String... editedTexts) {
+        TextAlignment.Mapper mapper = TextAlignment.mapper(formatted, raw);
+        for (String edited : editedTexts) {
+            assertEquals(
+                    TextAlignment.applyEditToRaw(raw, formatted, edited),
+                    TextAlignment.applyEditToRaw(raw, formatted, edited, mapper),
+                    "edited: " + edited);
+        }
+    }
 }

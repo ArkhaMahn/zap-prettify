@@ -1,6 +1,7 @@
 package org.zaproxy.zap.extension.prettify;
 
 import java.awt.Component;
+import java.lang.ref.WeakReference;
 import java.util.EnumMap;
 import java.util.Map;
 import javax.swing.JCheckBoxMenuItem;
@@ -26,7 +27,7 @@ public class PrettifyViewOptionsMenu extends ExtensionPopupMenu {
             new EnumMap<>(PrettifyTextArea.Option.class);
 
     /** The text area whose view the menu is about (set again on every show). */
-    private PrettifyTextArea toggling;
+    private WeakReference<PrettifyTextArea> toggling = new WeakReference<>(null);
 
     public PrettifyViewOptionsMenu() {
         super(Constant.messages.getString("prettify.popup.menu"));
@@ -34,8 +35,12 @@ public class PrettifyViewOptionsMenu extends ExtensionPopupMenu {
             JCheckBoxMenuItem item = new JCheckBoxMenuItem(label(option));
             item.addActionListener(
                     event -> {
+                        // The menu is a long-lived singleton (registered in ZAP's popup list), so it
+                        // must not pin the last shown text area (and its document/message). A weak
+                        // reference lets that view be collected once it is no longer displayed.
+                        PrettifyTextArea area = toggling.get();
                         PrettifyTextArea.Options options =
-                                toggling == null ? null : toggling.options();
+                                area == null ? null : area.options();
                         if (options != null) {
                             options.setOn(option, item.isSelected());
                         }
@@ -79,7 +84,7 @@ public class PrettifyViewOptionsMenu extends ExtensionPopupMenu {
                 any = true;
             }
         }
-        this.toggling = area;
+        this.toggling = new WeakReference<>(area);
         return any;
     }
 

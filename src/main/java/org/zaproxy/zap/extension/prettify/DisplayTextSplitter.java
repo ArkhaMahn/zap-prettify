@@ -63,7 +63,6 @@ public final class DisplayTextSplitter {
     private static final LineCache LINE_CACHE = new LineCache(LINE_CACHE_BUDGET);
 
     private DisplayTextSplitter() {}
-
     /** Drops the shared token cache so an unloaded add-on leaves no retained text behind. */
     static void clearCache() {
         LINE_CACHE.clear();
@@ -417,6 +416,7 @@ public final class DisplayTextSplitter {
         int state = 0;
         int pos = 0;
         int lineIndex = 0;
+        long cacheEpoch = LINE_CACHE.epoch();
         try {
             while (pos <= n) {
                 int nl = text.indexOf('\n', pos);
@@ -461,7 +461,8 @@ public final class DisplayTextSplitter {
                                     line,
                                     Arrays.copyOfRange(info.tokenType, pos, end),
                                     Arrays.copyOfRange(info.tokenEnd, pos, end),
-                                    state);
+                                    state,
+                                    cacheEpoch);
                         }
                     }
                 } else {
@@ -737,11 +738,17 @@ public final class DisplayTextSplitter {
     private static final class LineCache {
         private final long budget;
         private long retained;
+        private long epoch;
         private final Map<Key, LineTokens> entries =
                 new LinkedHashMap<>(64, 0.75f, true);
 
         LineCache(long budget) {
             this.budget = budget;
+        }
+
+        /** The current epoch, captured by a split so a late write after a clear is rejected. */
+        synchronized long epoch() {
+            return epoch;
         }
 
         synchronized LineTokens get(String style, String context, int state, String line) {
@@ -755,11 +762,20 @@ public final class DisplayTextSplitter {
                 String line,
                 byte[] types,
                 int[] ends,
-                int outState) {
+                int outState,
+                long expectedEpoch) {
+            if (expectedEpoch != epoch) {
+                // The cache was cleared (session change/unload) while this split was running. Do
+                // not repopulate it with lines from the old session.
+                return;
+            }
             LineTokens value = new LineTokens(types, ends, outState);
             LineTokens old = entries.put(new Key(style, context, state, line), value);
             if (old != null) {
-                retained -= old.cost;
+                // HashMap keeps the previously stored key object, whose line has the same length
+                // as the equal line passed here. Subtract both the old value's and the old key
+                // line's cost so a replacement does not double-count the retained line.
+                retained -= 2L * line.length() + old.cost;
             }
             retained += 2L * line.length() + value.cost;
             Iterator<Map.Entry<Key, LineTokens>> it = entries.entrySet().iterator();
@@ -772,6 +788,7 @@ public final class DisplayTextSplitter {
 
         /** Drops every cached line, for example when the add-on is unloaded. */
         synchronized void clear() {
+            epoch++;
             entries.clear();
             retained = 0;
         }
@@ -1008,21 +1025,32 @@ public final class DisplayTextSplitter {
      */
     static int[] shiftOffsets(int[] offsets, int offset, int removed, int inserted) {
         int delta = inserted - removed;
-        int[] shifted = new int[offsets.length];
-        int count = 0;
-        for (int o : offsets) {
-            if (o < offset) {
-                shifted[count++] = o;
-            } else if (o >= offset + removed) {
-                shifted[count++] = o + delta;
+        // The offsets are sorted, so find the kept prefix and the shifted suffix with binary
+        // searches instead of scanning the whole array. A wrapped document can have thousands of
+        // continuation rows, and this runs on every insert/remove event while the user types.
+        int kept = lowerBound(offsets, offset);
+        int gone = lowerBound(offsets, offset + removed);
+        int[] shifted = new int[kept + offsets.length - gone];
+        System.arraycopy(offsets, 0, shifted, 0, kept);
+        for (int i = gone; i < offsets.length; i++) {
+            shifted[kept + i - gone] = offsets[i] + delta;
+        }
+        return shifted;
+    }
+
+    /** The first index in {@code sorted} whose value is at least {@code value}. */
+    private static int lowerBound(int[] sorted, int value) {
+        int lo = 0;
+        int hi = sorted.length;
+        while (lo < hi) {
+            int mid = (lo + hi) >>> 1;
+            if (sorted[mid] < value) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
             }
         }
-        if (count == shifted.length) {
-            return shifted;
-        }
-        int[] trimmed = new int[count];
-        System.arraycopy(shifted, 0, trimmed, 0, count);
-        return trimmed;
+        return lo;
     }
 
     /** The display text plus everything needed to map offsets back to the original text. */
